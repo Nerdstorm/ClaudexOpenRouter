@@ -64,4 +64,6 @@ The default data directory is `~/.local/share/chatgpt-plan-gateway` with mode `0
 
 These files are local runtime data, not a database or source-controlled configuration. They are not encrypted at rest; protection is the operating-system user boundary and file permissions. No code reads desktop authentication or browser cookies. Logs exclude request/answer content and credentials; HTTP access logs remain off to protect OAuth codes.
 
-The service currently runs in the foreground. Starting it with `serve` is explicit; no launch agent or automatic startup is installed.
+The standalone Git checkout lives at `~/src/chatgpt-plan-gateway`, alongside other projects rather than inside the Smartmeals workspace. Its virtual environment belongs to that checkout; after relocating it, recreate the environment with `uv venv --clear --python 3.12 .venv` and `uv sync --frozen`. Runtime accounts and keys remain in the separate data directory.
+
+The service currently runs in the foreground. Start it from the checkout with `uv run chatgpt-gateway serve`; no launch agent or automatic startup is installed.

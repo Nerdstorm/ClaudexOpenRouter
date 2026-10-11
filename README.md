@@ -8,9 +8,10 @@ Models run at OpenAI. The gateway uses the documented [Sign in with ChatGPT plan
 
 ## Start and connect
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). From this directory:
+The standalone checkout is `~/src/chatgpt-plan-gateway`. Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
+cd ~/src/chatgpt-plan-gateway
 uv sync --frozen
 uv run chatgpt-gateway serve
 ```
@@ -18,6 +19,7 @@ uv run chatgpt-gateway serve
 Keep the server running. In another terminal:
 
 ```sh
+cd ~/src/chatgpt-plan-gateway
 uv run chatgpt-gateway login
 uv run chatgpt-gateway status
 uv run chatgpt-gateway models
