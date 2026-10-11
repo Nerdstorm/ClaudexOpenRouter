@@ -18,6 +18,7 @@ class Settings:
     max_concurrency: int = 2
     timeout_seconds: float = 600
     max_request_bytes: int = 8 * 1024 * 1024
+    accept_chatgpt_data_controls: bool = False
 
     @property
     def base_url(self) -> str:
@@ -29,6 +30,9 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        data_controls = os.environ.get("CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS", "0")
+        if data_controls not in {"0", "1"}:
+            raise ValueError("CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS must be 0 or 1")
         settings = cls(
             data_dir=Path(
                 os.environ.get("CHATGPT_GATEWAY_DATA_DIR", "~/.local/share/chatgpt-plan-gateway")
@@ -39,6 +43,7 @@ class Settings:
             max_concurrency=int(os.environ.get("CHATGPT_GATEWAY_MAX_CONCURRENCY", "2")),
             timeout_seconds=float(os.environ.get("CHATGPT_GATEWAY_TIMEOUT_SECONDS", "600")),
             max_request_bytes=int(os.environ.get("CHATGPT_GATEWAY_MAX_REQUEST_BYTES", "8388608")),
+            accept_chatgpt_data_controls=data_controls == "1",
         )
         if not 1 <= settings.port <= 65535:
             raise ValueError("CHATGPT_GATEWAY_PORT must be between 1 and 65535")

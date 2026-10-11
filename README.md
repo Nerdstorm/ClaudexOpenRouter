@@ -86,6 +86,7 @@ All commands use the same environment settings. Put `--port` before the command 
 | `CHATGPT_GATEWAY_MAX_CONCURRENCY` | `2` |
 | `CHATGPT_GATEWAY_TIMEOUT_SECONDS` | `600` |
 | `CHATGPT_GATEWAY_MAX_REQUEST_BYTES` | `8388608` (8 MiB) |
+| `CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS` | `0` (strict data-policy handling) |
 
 The server binds to `127.0.0.1`. Management and inference require the local key. Foreign browser origins are refused; this version supports local server/CLI clients rather than direct cross-origin browser applications. One server may use a data directory at a time, preventing refresh-token races.
 
@@ -95,7 +96,9 @@ For role comparisons, compare chef models with the judge and inputs held fixed. 
 
 Use multiple recipe types and randomise/interleave model order. Repeated calls on one recipe are related observations; they cannot replace a diverse recipe sample. Determine a larger sample size from a pilot and a prespecified useful effect. Confirm shortlisted configurations on the production provider before changing production choices.
 
-The gateway records metadata for those comparisons but does not run the benchmark suite. Recipe Designer has not been connected or changed. In particular, clients using OpenRouter `provider.data_collection="deny"`, sampling parameters, or token ceilings need an explicit compatibility decision; those requests fail here instead of silently changing their meaning.
+The gateway records metadata for those comparisons but does not run an application's benchmark suite. Clients may use the existing OpenRouter base-URL and API-key overrides; their application source need not change. The OpenRouter native web-search tool is translated to OpenAI's native Responses search where the model and account permit it.
+
+OpenRouter `provider.data_collection="deny"` is refused by default. An operator who explicitly accepts **ChatGPT account data controls in place of that OpenRouter policy** may start the gateway with `CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS=1`. This is a policy exception, not an attestation that the original pin is fulfilled. The gateway cannot inspect or change the account's data controls. Each affected call is marked in response headers and the request journal; the capability endpoint exposes whether the exception is enabled. Keep the default for clients that require the original policy. Sampling parameters, token ceilings, provider restrictions and model/billing fallback prohibitions are not relaxed by this setting.
 
 ## Storage, development, and current verification
 

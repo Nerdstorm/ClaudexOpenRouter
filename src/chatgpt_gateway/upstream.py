@@ -168,6 +168,7 @@ class PlanClient:
                         "reasoning": prepared.body.get("reasoning"),
                         "format": (prepared.schema or {}).get("type", "text"),
                         "stream": prepared.stream,
+                        "data_policy_override": prepared.data_policy_override,
                     }
                 )
                 began = True
@@ -296,5 +297,6 @@ class PlanClient:
                         "duration_ms": round((time.monotonic() - started) * 1000),
                         "upstream_request_id": upstream_id,
                         "usage": usage,
+                        "data_policy_override": prepared.data_policy_override,
                     }
                 )

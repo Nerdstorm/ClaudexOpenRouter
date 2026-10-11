@@ -112,6 +112,7 @@ class Store:
             "format",
             "stream",
             "error_param",
+            "data_policy_override",
         }
         if set(event) - allowed:
             raise ValueError("Unexpected journal field")

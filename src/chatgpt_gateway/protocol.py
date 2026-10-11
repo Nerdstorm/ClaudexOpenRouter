@@ -64,9 +64,10 @@ def local_schema_references(value: Any) -> None:
             local_schema_references(child)
 
 
-def provider_preferences(preferences: Any) -> None:
+def provider_preferences(preferences: Any, *, accept_chatgpt_data_controls: bool = False) -> bool:
+    """Validate pins; return whether the operator explicitly overrides the data policy."""
     if preferences is None:
-        return
+        return False
     if not isinstance(preferences, dict):
         raise invalid("provider must be an object.", "provider")
     permitted = {"only", "allow_fallbacks", "require_parameters", "data_collection"}
@@ -80,12 +81,38 @@ def provider_preferences(preferences: Any) -> None:
         )
     if preferences.get("allow_fallbacks") is True:
         raise invalid("Provider fallback is unavailable.", "provider.allow_fallbacks")
+    if preferences.get("data_collection") == "deny" and accept_chatgpt_data_controls:
+        return True
     if preferences.get("data_collection") not in (None, "allow"):
         raise invalid(
             "The gateway cannot attest an OpenRouter data-collection policy. "
             "Manage data controls in ChatGPT or use the provider that fulfils that requirement.",
             "provider.data_collection",
         )
+    return False
+
+
+def chat_tools(body: dict) -> list[dict]:
+    """Translate the explicit OpenRouter native-search subset; never substitute engines."""
+    tools = [] if body.get("tools") is None else body["tools"]
+    if not isinstance(tools, list):
+        raise invalid("tools must be an array.", "tools")
+    if not tools:
+        if body.get("tool_choice") not in (None, "none"):
+            raise invalid("No tool is available for that tool_choice.", "tool_choice")
+        return []
+    if len(tools) != 1 or tools[0] != {
+        "type": "openrouter:web_search",
+        "parameters": {"engine": "native"},
+    }:
+        raise invalid(
+            "Chat tools support only openrouter:web_search with engine:native. "
+            "Use /v1/responses for native tool definitions.",
+            "tools",
+        )
+    if body.get("tool_choice") not in (None, "auto", "none", "required"):
+        raise invalid("Unsupported native search tool_choice.", "tool_choice")
+    return [{"type": "web_search"}]
 
 
 def reasoning(value: Any) -> dict | None:
@@ -166,11 +193,14 @@ class Prepared:
     stream: bool
     include_usage: bool = False
     schema: dict | None = None
+    data_policy_override: bool = False
 
 
-def chat_request(body: dict[str, Any]) -> Prepared:
+def chat_request(body: dict[str, Any], *, accept_chatgpt_data_controls: bool = False) -> Prepared:
     unknown_fields(body, CHAT_FIELDS)
-    provider_preferences(body.get("provider"))
+    overridden = provider_preferences(
+        body.get("provider"), accept_chatgpt_data_controls=accept_chatgpt_data_controls
+    )
     if body.get("parallel_tool_calls") is not None:
         raise invalid(
             "Chat Completions function tools are unavailable; omit parallel_tool_calls.",
@@ -189,12 +219,7 @@ def chat_request(body: dict[str, Any]) -> Prepared:
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise invalid("A nonempty messages array is required.", "messages")
-    if body.get("tools") or body.get("tool_choice") not in (None, "none"):
-        raise invalid(
-            "Chat Completions function tools are not supported in this version. "
-            "Use namespaced native Responses tools on /v1/responses.",
-            "tools",
-        )
+    tools = chat_tools(body)
     inputs = []
     for message in messages:
         if not isinstance(message, dict):
@@ -234,8 +259,16 @@ def chat_request(body: dict[str, Any]) -> Prepared:
         upstream["reasoning"] = thought
     if output_format:
         upstream["text"] = {"format": output_format}
+    if tools:
+        upstream["tools"] = tools
+        if body.get("tool_choice") is not None:
+            upstream["tool_choice"] = body["tool_choice"]
     return Prepared(
-        upstream, body.get("stream", False), bool(options.get("include_usage")), output_format
+        upstream,
+        body.get("stream", False),
+        bool(options.get("include_usage")),
+        output_format,
+        data_policy_override=overridden,
     )
 
 
@@ -304,16 +337,28 @@ def responses_request(body: dict[str, Any]) -> Prepared:
     return Prepared(upstream, body.get("stream", False), schema=output_format)
 
 
-def usage_counts(usage: dict | None) -> dict | None:
-    if usage is None:
-        return None
-    return {
-        "prompt_tokens": usage.get("input_tokens"),
-        "completion_tokens": usage.get("output_tokens"),
-        "total_tokens": usage.get("total_tokens"),
-        "prompt_tokens_details": usage.get("input_tokens_details"),
-        "completion_tokens_details": usage.get("output_tokens_details"),
-    }
+def usage_counts(usage: dict | None, response: dict | None = None) -> dict | None:
+    counts = (
+        {
+            "prompt_tokens": usage.get("input_tokens"),
+            "completion_tokens": usage.get("output_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+            "prompt_tokens_details": usage.get("input_tokens_details"),
+            "completion_tokens_details": usage.get("output_tokens_details"),
+        }
+        if usage is not None
+        else None
+    )
+    if response is not None:
+        calls = [
+            item for item in response.get("output") or [] if item.get("type") == "web_search_call"
+        ]
+        if calls:
+            counts = counts or {}
+            counts["server_tool_use_details"] = {
+                "web_search_requests": sum(item.get("status") == "completed" for item in calls)
+            }
+    return counts
 
 
 def assistant_message(response: dict) -> dict:
@@ -330,7 +375,18 @@ def assistant_message(response: dict) -> dict:
         for content in item.get("content") or []:
             if content.get("type") == "output_text":
                 texts.append(content.get("text", ""))
-                annotations.extend(content.get("annotations") or [])
+                for annotation in content.get("annotations") or []:
+                    if annotation.get("type") == "url_citation":
+                        annotations.append(
+                            {
+                                "type": "url_citation",
+                                "url_citation": {
+                                    k: v for k, v in annotation.items() if k != "type"
+                                },
+                            }
+                        )
+                    else:
+                        annotations.append(annotation)
             elif content.get("type") == "refusal":
                 refusals.append(content.get("refusal", ""))
     message = {"role": "assistant", "content": "".join(texts) if texts else None}
@@ -368,6 +424,7 @@ def completion(response: dict, request_id: str, requested_model: str) -> dict:
         "object": "chat.completion",
         "created": response.get("created_at", 0),
         "model": served_model,
+        "provider": "chatgpt_plan",
         "choices": [{"index": 0, "message": assistant_message(response), "finish_reason": "stop"}],
-        "usage": usage_counts(response.get("usage")),
+        "usage": usage_counts(response.get("usage"), response),
     }

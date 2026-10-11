@@ -173,6 +173,9 @@ def create_app(
             "image_input": "subject_to_model_access",
             "image_generation": False,
             "billing_fallback": False,
+            "chat_web_search": "openrouter_native_subject_to_model_access",
+            "data_controls": "chatgpt_account",
+            "openrouter_data_policy_override_enabled": settings.accept_chatgpt_data_controls,
             "unsupported_parameters": [
                 "temperature",
                 "top_p",
@@ -249,7 +252,11 @@ def create_app(
     async def infer(request: Request, *, chat: bool):
         authorize(request)
         body = await read_body(request, settings.max_request_bytes)
-        prepared = chat_request(body) if chat else responses_request(body)
+        prepared = (
+            chat_request(body, accept_chatgpt_data_controls=settings.accept_chatgpt_data_controls)
+            if chat
+            else responses_request(body)
+        )
         request_id = uuid.uuid4().hex
         events = app.state.plan.events(
             prepared,
@@ -259,6 +266,9 @@ def create_app(
             client_name=request.headers.get("x-title", "unspecified")[:100],
         )
         headers = {"x-gateway-request-id": request_id, "x-gateway-provider": "chatgpt_plan"}
+        headers["x-gateway-data-controls"] = "chatgpt_account"
+        if prepared.data_policy_override:
+            headers["x-gateway-policy-override"] = "provider.data_collection"
         if not prepared.stream:
             try:
                 async for event in events:
@@ -355,7 +365,10 @@ async def chat_stream(events, first, prepared: Prepared, request_id: str, model:
             yield sse(chunk({}, "stop"))
             if prepared.include_usage:
                 usage_chunk = chunk({})
-                usage_chunk.update(choices=[], usage=usage_counts(event["response"].get("usage")))
+                usage_chunk.update(
+                    choices=[],
+                    usage=usage_counts(event["response"].get("usage"), event["response"]),
+                )
                 yield sse(usage_chunk)
             yield sse("[DONE]")
 

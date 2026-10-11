@@ -27,8 +27,8 @@ All routes in the following table require the local bearer key.
 - `reasoning_effort`, or `reasoning` with `effort`/`summary`: passed through after validation. Efforts are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; the selected model may reject otherwise valid settings. Both forms together are refused.
 - `stream`: boolean, default false. `stream_options.include_usage` requests a final usage chunk.
 - `n`: exactly `1`.
-- `tools`: no Chat function tools in this version. Empty tools or `tool_choice:"none"` are accepted. Use supported native Responses namespaces for tool definitions.
-- `provider`: `only:["openai"]`, `allow_fallbacks:false` and `require_parameters` are accepted compatibility preferences. `data_collection:"allow"` is accepted; `"deny"` is refused because this gateway cannot attest OpenRouter's data-policy contract. Manage the connected account's ChatGPT data controls directly.
+- `tools`: accepts exactly one `{"type":"openrouter:web_search","parameters":{"engine":"native"}}`, translated to a native Responses `web_search`. Search tool choice may be `auto`, `required`, `none` or omitted. Other engines, parameters, duplicate tools and Chat function tools are refused. Empty tools or `tool_choice:"none"` are accepted. Use supported native Responses namespaces for function definitions. Search remains subject to model/account admission.
+- `provider`: `only:["openai"]`, `allow_fallbacks:false` and `require_parameters` are accepted compatibility preferences. `data_collection:"allow"` is accepted; `"deny"` is refused by default because this gateway cannot attest OpenRouter's data-policy contract. Only an explicit operator exception (`CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS=1`) permits that request under the connected account's ChatGPT data controls. This setting does not enforce or verify a no-training policy. Such calls carry `x-gateway-policy-override: provider.data_collection` and `x-gateway-data-controls: chatgpt_account`, and journal `data_policy_override:true`. All other pins remain checked. `/gateway/capabilities` reports the exception's state.
 
 Sampling/ceiling controls such as `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `seed`, penalties and stop sequences are refused. They are not silently discarded, replaced with defaults, or recorded as if applied.
 
@@ -57,6 +57,8 @@ If the upstream terminal response leaves `output` empty, the gateway fills it fr
 Local JSON/schema validation is performed at completion, so streamed JSON fragments are provisional until the final marker. Invalid JSON, schema mismatch, refusal, interrupted output and quota failures should remain distinct benchmark outcomes. The gateway never attempts an additional model call to fix them.
 
 `x-gateway-request-id` identifies an admitted API call; `x-upstream-request-id` is supplied on errors when known. `X-Title` labels a client in the metadata journal. HTTP retry hints are preserved. Keep SDK automatic retries off (`max_retries=0`) and decide benchmark retry policy explicitly.
+
+Chat output sets `provider:"chatgpt_plan"`, without fabricating OpenRouter prices or BYOK claims. Completed native `web_search_call` items supply `usage.server_tool_use_details.web_search_requests`; this counts completed tool invocations, not the search backend's individual HTTP requests. Providing a search tool without evidence of its execution never invents a call. Native URL citations are translated into Chat's `url_citation` object shape. Usage chunks include the same tool evidence.
 
 The model catalog contains `access_verified:false`: access is confirmed only by a completed real inference for the selected model/account. The journal is a diagnostic record, not a billing ledger. Missing usage is `null`, never fabricated as zero, and no cash price is estimated. Account credits remain controlled by ChatGPT usage settings, even though there is no API-key billing fallback.
 
