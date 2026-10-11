@@ -50,6 +50,10 @@ A nonstreaming Chat result reports the actual completed model, its text/refusal 
 
 Streaming clients must consume through the terminal result. HTTP `200` and partial text do not establish success: a quota or permission error may arrive after streaming begins. On failure, an error is emitted and no successful finish chunk appears. Native clients must see `response.completed`; Chat clients must see a successful finish marker and no error. The OpenAI SDK's stream iterator surfaces error payloads as exceptions.
 
+Upstream responses with an absent `Content-Type` header are admitted to the SSE parser because the live plan route has returned valid streams that way. A supplied non-SSE media type is refused. This does not relax completion, model, schema or error checks.
+
+If the upstream terminal response leaves `output` empty, the gateway fills it from that request's finalized `response.output_item.done` events before schema validation. Native terminal events/objects and Chat results therefore contain the finished answer. The gateway does not synthesize completion from partial deltas or an item finishing by itself; terminal completion, ordered item coverage and the original validation rules still apply.
+
 Local JSON/schema validation is performed at completion, so streamed JSON fragments are provisional until the final marker. Invalid JSON, schema mismatch, refusal, interrupted output and quota failures should remain distinct benchmark outcomes. The gateway never attempts an additional model call to fix them.
 
 `x-gateway-request-id` identifies an admitted API call; `x-upstream-request-id` is supplied on errors when known. `X-Title` labels a client in the metadata journal. HTTP retry hints are preserved. Keep SDK automatic retries off (`max_retries=0`) and decide benchmark retry policy explicitly.

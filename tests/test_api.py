@@ -387,3 +387,144 @@ def test_transport_error_is_a_failed_journal_event(client, backend, store):
     client.app.state.plan.client._transport = httpx.MockTransport(disconnected)
     response = client.post("/v1/chat/completions", json=REQUEST)
     assert response.status_code == 502 and store.recent()[-1]["event"] == "failed"
+
+
+@pytest.mark.parametrize("content_type", [None, "Text/Event-Stream; charset=utf-8"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+def test_valid_sse_with_missing_or_case_insensitive_media_type(
+    client, backend, store, content_type, stream, native
+):
+    backend.content_type = content_type
+    path = "/v1/responses" if native else "/v1/chat/completions"
+    body = (
+        {"model": "gpt-5.6-terra", "input": "Hi", "stream": stream}
+        if native
+        else {**REQUEST, "stream": stream}
+    )
+    response = client.post(path, json=body)
+    assert response.status_code == 200
+    if stream:
+        marker = '"type": "response.completed"' if native else '"finish_reason": "stop"'
+        assert marker in response.text
+    elif native:
+        assert response.json()["status"] == "completed"
+    else:
+        assert response.json()["choices"][0]["message"]["content"] == "Hello"
+    assert store.recent()[-1]["event"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "content_type", ["application/json", "text/plain", "text/event-stream-bad"]
+)
+def test_explicit_non_sse_media_type_remains_a_failure(client, backend, store, content_type):
+    backend.content_type = content_type
+    response = client.post("/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "invalid_upstream_stream"
+    assert store.recent()[-1]["event"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "events,status,code",
+    [
+        ([], 502, "incomplete_stream"),
+        ([{"type": "response.output_text.delta", "delta": "partial"}], 502, "incomplete_stream"),
+        (
+            [
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": "subscription_sharing_usage_limit_exceeded"}},
+                }
+            ],
+            429,
+            "subscription_sharing_usage_limit_exceeded",
+        ),
+    ],
+)
+def test_missing_media_type_does_not_turn_unfinished_or_failed_output_into_success(
+    client, backend, store, events, status, code
+):
+    backend.content_type = None
+    backend.events = events
+    response = client.post("/v1/chat/completions", json=REQUEST)
+    assert response.status_code == status
+    assert response.json()["error"]["code"] == code
+    assert store.recent()[-1]["event"] == "failed"
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_sdk_schema_parse_recovers_finished_items_from_empty_terminal_output(
+    client, backend, store, native
+):
+    class Answer(BaseModel):
+        answer: str
+
+    item = completed('{"answer":"yes"}')["output"][0]
+    backend.content_type = None
+    backend.events = [
+        {"type": "response.output_item.done", "output_index": 0, "item": item},
+        {"type": "response.completed", "response": completed(output=[])},
+    ]
+    sdk = OpenAI(
+        base_url="http://127.0.0.1:8317/v1",
+        api_key=store.api_key,
+        max_retries=0,
+        http_client=client,
+    )
+    if native:
+        result = sdk.responses.parse(model="gpt-5.6-terra", input="Hi", text_format=Answer)
+        assert result.output_parsed.answer == "yes"
+    else:
+        result = sdk.chat.completions.parse(
+            model="gpt-5.6-terra",
+            messages=REQUEST["messages"],
+            response_format=Answer,
+        )
+        assert result.choices[0].message.parsed.answer == "yes"
+    assert store.recent()[-1]["event"] == "completed"
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_finished_item_still_requires_valid_terminal_status(client, backend, store, terminal):
+    backend.events = [
+        {"type": "response.output_item.done", "output_index": 0, "item": completed()["output"][0]},
+    ]
+    if terminal:
+        backend.events.append(
+            {"type": "response.completed", "response": completed(status="incomplete", output=[])}
+        )
+    response = client.post("/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 502
+    assert store.recent()[-1]["event"] == "failed"
+
+
+@pytest.mark.parametrize("done", [False, True])
+def test_recovery_does_not_accept_partial_items_or_invalid_final_json(client, backend, done):
+    item = completed('{"answer":5}' if done else '{"answer":"yes"}')["output"][0]
+    backend.events = [
+        {
+            "type": "response.output_item.done" if done else "response.output_item.added",
+            "output_index": 0,
+            "item": item,
+        },
+        {"type": "response.completed", "response": completed(output=[])},
+    ]
+    response = client.post("/v1/chat/completions", json={**REQUEST, "response_format": SCHEMA})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "schema_validation_failed"
+
+
+@pytest.mark.parametrize("index", [-1, True, 1])
+def test_invalid_or_missing_output_indices_cannot_be_recovered(client, backend, index):
+    backend.events = [
+        {
+            "type": "response.output_item.done",
+            "output_index": index,
+            "item": completed()["output"][0],
+        },
+        {"type": "response.completed", "response": completed(output=[])},
+    ]
+    response = client.post("/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "invalid_upstream_stream"

@@ -50,6 +50,7 @@ def completed(text: str = "Hello", **changes) -> dict:
 @dataclass
 class Backend:
     events: list[dict] | None = None
+    content_type: str | None = "text/event-stream"
     status: int = 200
     error_body: dict[str, Any] = field(default_factory=lambda: {"detail": "Unavailable"})
     requests: list[httpx.Request] = field(default_factory=list)
@@ -92,14 +93,10 @@ class Backend:
         data = ": keepalive\n\n" + "".join(
             f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
         )
-        return httpx.Response(
-            200,
-            content=data,
-            headers={
-                "content-type": "text/event-stream",
-                "x-request-id": "upstream-id",
-            },
-        )
+        headers = {"x-request-id": "upstream-id"}
+        if self.content_type is not None:
+            headers["content-type"] = self.content_type
+        return httpx.Response(200, content=data.encode(), headers=headers)
 
 
 @pytest.fixture

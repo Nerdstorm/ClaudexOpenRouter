@@ -4,6 +4,8 @@ A standalone local gateway that lets applications send OpenAI/OpenRouter-shaped 
 
 The gateway supports text generation, JSON schemas, streaming, account-specific model discovery, and image inputs for models that accept them. Image generation and editing are unavailable through the documented plan route. Compatibility covers an explicit subset; see [the compatibility contract](docs/compatibility.md).
 
+Completion is checked against the actual SSE events, including when the upstream omits a `Content-Type` header or leaves the terminal output list empty. Finished output items are retained for validation at completion. Partial text, missing completion and invalid JSON remain failures.
+
 Models run at OpenAI. The gateway uses the documented [Sign in with ChatGPT plan-usage flow](https://developers.openai.com/siwc/token-sharing-open-source) and the public Responses API.
 
 ## Start and connect

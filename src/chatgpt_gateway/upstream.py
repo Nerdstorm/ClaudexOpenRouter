@@ -141,6 +141,7 @@ class PlanClient:
         account = None
         began = False
         actual_model = prepared.body["model"]
+        completed_items: dict[int, dict] = {}
         try:
             async with asyncio.timeout(self.settings.timeout_seconds):
                 account = await self.auth.credentials()
@@ -185,7 +186,11 @@ class PlanClient:
                     if response.status_code != 200:
                         await response.aread()
                         raise upstream_error(response)
-                    if "text/event-stream" not in response.headers.get("content-type", ""):
+                    content_type = response.headers.get("content-type", "").split(";", 1)[0]
+                    content_type = content_type.strip().lower()
+                    # A live plan response may omit this header while still carrying SSE.
+                    # The parser and validated terminal event remain the completion gate.
+                    if content_type and content_type != "text/event-stream":
                         raise GatewayError(
                             502,
                             "OpenAI did not return a Responses event stream.",
@@ -193,6 +198,16 @@ class PlanClient:
                         )
                     async for event in sse_events(response):
                         kind = event["type"]
+                        if kind == "response.output_item.done":
+                            index, item = event.get("output_index"), event.get("item")
+                            if type(index) is not int or index < 0 or not isinstance(item, dict):
+                                raise GatewayError(
+                                    502,
+                                    "OpenAI returned an invalid finished output item.",
+                                    "invalid_upstream_stream",
+                                    request_id=upstream_id,
+                                )
+                            completed_items[index] = item
                         if kind in {"response.failed", "response.incomplete", "error"}:
                             terminal = event.get("response") or {}
                             usage = terminal.get("usage")
@@ -208,6 +223,29 @@ class PlanClient:
                             )
                         if kind == "response.completed":
                             completed = event.get("response") or {}
+                            if completed.get("status") != "completed":
+                                raise GatewayError(
+                                    502,
+                                    "The completion event did not confirm a completed response.",
+                                    "invalid_upstream_stream",
+                                    request_id=upstream_id,
+                                )
+                            # The live route can leave terminal output empty; item.done
+                            # carries the finished content. Never recover from partial deltas.
+                            if completed.get("output") in (None, []) and completed_items:
+                                indices = sorted(completed_items)
+                                if indices != list(range(len(indices))):
+                                    raise GatewayError(
+                                        502,
+                                        "The stream omitted a finished output item.",
+                                        "invalid_upstream_stream",
+                                        request_id=upstream_id,
+                                    )
+                                completed = {
+                                    **completed,
+                                    "output": [completed_items[i] for i in indices],
+                                }
+                                event = {**event, "response": completed}
                             usage = completed.get("usage")
                             returned_model = completed.get("model")
                             if not isinstance(returned_model, str) or not (

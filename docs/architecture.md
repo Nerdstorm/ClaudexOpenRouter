@@ -47,6 +47,10 @@ After local validation, the server acquires a concurrency slot, obtains renewabl
 
 Every upstream inference uses `POST https://api.openai.com/v1/responses`, `store:false`, and `stream:true`. The client sends all required history. Nonstreaming clients receive an object only after `response.completed`; streaming clients receive events/chunks, and a finish marker is emitted only after validated completion. JSON-format requests are checked locally at completion. Refusals retain their own representation.
 
+The live plan route has returned valid SSE bodies without a `Content-Type` header. When that header is absent, the gateway parses the body as SSE and still requires the same validated terminal event. A supplied media type must be `text/event-stream` (case-insensitive, with optional parameters); empty, incomplete or malformed bodies still fail.
+
+The route has also returned an empty terminal `output` list after supplying the finished message in `response.output_item.done`. The transport retains those finished items per request, orders them by `output_index`, and fills an absent/empty terminal list before model/schema validation and downstream delivery. Partial deltas and added-but-unfinished items are never used for that recovery. A valid `response.completed` with status `completed` is still required; explicit terminal output is preserved when supplied.
+
 HTTP errors preserve upstream status, body shape, code, parameter, retry hint and request ID where supplied. Known plan errors inside SSE use the statuses documented by OpenAI. Interrupted, incomplete, malformed or mismatched-model results fail. There is no automatic inference retry or model fallback.
 
 Admitted attempts have a `started` event and a terminal `completed`, `failed` or `interrupted` event with actual model, elapsed time, request ID and usage when available. Credential/model preflight failures are returned to the caller before a journal attempt begins. Validation failures are not recorded as model executions. Response usage remains unknown when the upstream omits it.
