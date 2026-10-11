@@ -1,0 +1,48 @@
+:root {
+  color-scheme: light dark;
+  --surface: light-dark(#ffffff, #202327);
+  --page: light-dark(#f5f6f8, #15171a);
+  --text: light-dark(#202327, #eef0f4);
+  --muted: light-dark(#626972, #acb3bd);
+  --accent: light-dark(#2056a6, #9ec2ff);
+  --border: light-dark(#dce0e6, #353b43);
+}
+
+body {
+  margin: 0;
+  padding: 1.5rem;
+  background: var(--page);
+  color: var(--text);
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+.connection-card {
+  max-width: 34rem;
+  margin: 10vh auto;
+  padding: clamp(1.5rem, 5vw, 3rem);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--surface);
+}
+
+.app-name {
+  margin-top: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+h1 {
+  margin: 1rem 0;
+  font-size: clamp(1.4rem, 4vw, 1.9rem);
+  line-height: 1.2;
+}
+
+.usage-link {
+  margin: 1.75rem 0 0;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 0.15em;
+}

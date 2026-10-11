@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chatgpt-plan-gateway"
+version = "0.1.0"
+description = "A local OpenAI-compatible gateway using an authorised ChatGPT plan connection"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "uvicorn>=0.34,<1",
+  "PyJWT[crypto]>=2.10,<3",
+  "jsonschema>=4.23,<5",
+  "filelock>=3.18,<4",
+]
+
+[project.scripts]
+chatgpt-gateway = "chatgpt_gateway.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1", "openai>=2,<3"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chatgpt_gateway"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
