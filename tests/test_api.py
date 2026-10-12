@@ -97,6 +97,30 @@ def test_bad_host_and_foreign_browser_origins_are_refused(client, backend):
     assert not backend.requests
 
 
+def test_docker_host_alias_is_local_but_does_not_bypass_auth_or_origin_checks(client):
+    assert client.get("/healthz", headers={"host": "host.docker.internal:8317"}).status_code == 200
+    assert (
+        client.get(
+            "/gateway/capabilities",
+            headers={"host": "host.docker.internal:8317", "authorization": "Bearer wrong"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.get(
+            "/gateway/capabilities", headers={"host": "host.docker.internal:8317"}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(
+            "/gateway/capabilities",
+            headers={"host": "host.docker.internal:8317", "origin": "https://attacker.test"},
+        ).status_code
+        == 403
+    )
+
+
 @pytest.mark.parametrize(
     "change",
     [

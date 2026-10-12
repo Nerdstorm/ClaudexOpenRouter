@@ -18,6 +18,10 @@ All routes in the following table require the local bearer key.
 
 `GET /healthz` and `/` are public local service information. `/auth/callback` is protected by one-time OAuth state/nonce/PKCE instead of a client bearer. Callback stylesheet assets are public. Other paths are outside the contract.
 
+Local containers on Docker Desktop or OrbStack may use `http://host.docker.internal:8317/api/v1`.
+That hostname is admitted alongside the loopback names; the server still binds to `127.0.0.1`,
+requires the local bearer key and rejects foreign browser origins.
+
 ## OpenAI Chat Completions input
 
 - `model`: exact catalog slug, with optional `openai/` prefix. Other providers, automatic model choice and fallback lists are unavailable.

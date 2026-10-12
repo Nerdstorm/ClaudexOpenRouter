@@ -53,6 +53,7 @@ Switching a client back to `https://openrouter.ai/api/v1` and an OpenRouter key 
 | --- | --- |
 | OpenAI-shaped base URL | `http://127.0.0.1:8317/v1` |
 | OpenRouter-shaped base URL | `http://127.0.0.1:8317/api/v1` |
+| Base URL from Docker Desktop / OrbStack containers | `http://host.docker.internal:8317/api/v1` |
 | API key | Local gateway key from `uv run chatgpt-gateway key` |
 | Model | Exact `id` from `models`; OpenAI also accepts its bare `canonical_slug` |
 | SDK retries | `0`, so a benchmark records each failure without hidden repeat calls |

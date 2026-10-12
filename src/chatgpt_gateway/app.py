@@ -96,7 +96,10 @@ def create_app(
     app.mount(
         "/static", StaticFiles(directory=str(files("chatgpt_gateway") / "static")), name="static"
     )
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost", "[::1]", "host.docker.internal"],
+    )
 
     @app.middleware("http")
     async def local_boundary(request: Request, call_next):
