@@ -1,12 +1,12 @@
 # ChatGPT Plan Gateway
 
-A standalone local gateway that lets applications send OpenAI/OpenRouter-shaped requests through an authorised ChatGPT plan connection. It is independent of Recipe Designer and contains no application prompts or recipe logic.
+A standalone local gateway that accepts OpenAI/OpenRouter-shaped requests and routes them to an authorised ChatGPT plan connection or the official Claude API. It is independent of Recipe Designer and contains no application prompts or recipe logic.
 
 The gateway supports text generation, JSON schemas, streaming, account-specific model discovery, and image inputs for models that accept them. Image generation and editing are unavailable through the documented plan route. Compatibility covers an explicit subset; see [the compatibility contract](docs/compatibility.md).
 
 Completion is checked against the actual SSE events, including when the upstream omits a `Content-Type` header or leaves the terminal output list empty. Finished output items are retained for validation at completion. Partial text, missing completion and invalid JSON remain failures.
 
-Models run at OpenAI. The gateway uses the documented [Sign in with ChatGPT plan-usage flow](https://developers.openai.com/siwc/token-sharing-open-source) and the public Responses API.
+OpenAI models use the documented [Sign in with ChatGPT plan-usage flow](https://developers.openai.com/siwc/token-sharing-open-source) and public Responses API. Claude uses the official Anthropic Messages API with a separately configured Console API key, without Claude Code or an agent harness. Both sit behind the gateway's OpenRouter-compatible Chat endpoint.
 
 ## Start and connect
 
@@ -31,6 +31,22 @@ uv run chatgpt-gateway models
 
 A model appearing in `models` is a catalog choice, not proof of inference access. Start with one small probe for the exact selected model. Terra and Sol are available only if your connected account exposes and permits their exact IDs.
 
+## Enable Claude and prompt caching
+
+Set `ANTHROPIC_API_KEY` in the server's environment, or save your Claude Console API key in `~/.local/share/chatgpt-plan-gateway/anthropic-api-key` with file permissions `0600`. An alternative owner-only file can be selected with `CHATGPT_GATEWAY_ANTHROPIC_API_KEY_FILE`. Restart the server after configuring the key. The key never belongs in this repository or in client requests; clients continue using the local gateway key. `status` reports whether Claude is configured without disclosing its key.
+
+The gateway checks Anthropic's actual model catalogue and exposes `anthropic/claude-sonnet-5.5` and `anthropic/claude-opus-5.5` only when those exact API models are listed. Claude works without a ChatGPT login; OpenAI calls still require that login. The `/v1/responses` route remains OpenAI-only; use `/api/v1/chat/completions` for Claude text, JSON-schema output and streaming.
+
+Caller-supplied OpenRouter `cache_control` markers are preserved, including five-minute and one-hour lifetimes. By default, when a request has no cache controls, the gateway marks only its final leading system/developer text block with a five-minute cache marker. It does not cache a changing user suffix automatically or rewrite prompts. Set `CHATGPT_GATEWAY_ANTHROPIC_SYSTEM_CACHE_TTL=off` to disable this default, or `1h` to request a longer lifetime. A request-level `cache_control:null` disables the default for that request; explicit block markers still apply.
+
+For portable caching when switching back to OpenRouter, put explicit markers in the request. See [the cache example and contract](docs/compatibility.md#claude-chat-and-prompt-caching). Prefixes must be identical and large enough for the chosen model. A cold parallel group is not guaranteed to share a cache: the first real response must begin before later calls can reuse its entry. Writes have a premium; record read/write tokens and latency and compare warm and cold calls. The gateway does not make extra warm-up calls or serialize benchmark runs.
+
+Anthropic usage is translated into OpenRouter's `cached_tokens` and `cache_write_tokens`, with uncached tokens and lifetime breakdown retained. Total prompt tokens include **uncached + cache-read + cache-write** tokens; they are not counted twice. Missing usage remains unknown. Each journal event labels the provider and Anthropic API billing source, and records duration and time to first text without recording text itself.
+
+Included Max credits must be claimed in Claude Console. Calls use that organization's API balance; purchased credits or invoiced usage can follow after included credits run out. The gateway cannot verify or enforce an included-credits-only balance. Use Console billing controls and workspace spend limits. There is no model/provider/billing fallback in the gateway. See [Anthropic's included-credit documentation](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers).
+
+Switching a client back to `https://openrouter.ai/api/v1` and an OpenRouter key preserves the supported model IDs, request fields and caching markers. This switches billing to OpenRouter and may start with a cold cache. Claude-plan API credits do not fund OpenRouter. Provider-specific options remain explicit errors on routes that do not support them.
+
 ## Connect a client
 
 | Setting | Value |
@@ -38,10 +54,10 @@ A model appearing in `models` is a catalog choice, not proof of inference access
 | OpenAI-shaped base URL | `http://127.0.0.1:8317/v1` |
 | OpenRouter-shaped base URL | `http://127.0.0.1:8317/api/v1` |
 | API key | Local gateway key from `uv run chatgpt-gateway key` |
-| Model | Exact `id` from `models`, or its bare `canonical_slug` |
+| Model | Exact `id` from `models`; OpenAI also accepts its bare `canonical_slug` |
 | SDK retries | `0`, so a benchmark records each failure without hidden repeat calls |
 
-The local gateway key authenticates applications to this server. It is separate from the OpenAI credentials saved by sign-in.
+The local gateway key authenticates applications to this server. It is separate from the OpenAI credentials saved by sign-in and the server's Anthropic API key.
 
 For the included probe:
 
@@ -57,7 +73,7 @@ A Python client can also use `OpenAI(base_url=..., api_key=..., max_retries=0)` 
 
 ## Plan allowance and credits
 
-Use [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage) to manage this app's allowance and whether it may use credits after reaching plan limits. If you want subscription allowance only, disable credits for this app there. The gateway has no API-key billing route or provider fallback, but it cannot override the account's credit permission. A model's token counts do not establish a cash price.
+Use [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage) to manage this app's allowance and whether it may use credits after reaching plan limits. If you want subscription allowance only, disable credits for this app there. The OpenAI route has no API-key billing fallback, and neither route has a provider fallback. The gateway cannot override the account's credit permission. A model's token counts do not establish a cash price.
 
 Plan usage can share limits with other applications, and account/workspace restrictions still apply. Quota failures are returned as failures. There is no automatic retry, model substitution, or switch to another billing route. See [OpenAI's accounts and usage documentation](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions).
 
@@ -87,10 +103,15 @@ All commands use the same environment settings. Put `--port` before the command 
 | `CHATGPT_GATEWAY_TIMEOUT_SECONDS` | `600` |
 | `CHATGPT_GATEWAY_MAX_REQUEST_BYTES` | `8388608` (8 MiB) |
 | `CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS` | `0` (strict data-policy handling) |
+| `ANTHROPIC_API_KEY` | Unset; enables the Anthropic API route when configured |
+| `CHATGPT_GATEWAY_ANTHROPIC_API_KEY_FILE` | `<data directory>/anthropic-api-key` (owner-only, optional) |
+| `CHATGPT_GATEWAY_ANTHROPIC_MAX_TOKENS` | `32768`; used only when a Claude request omits its ceiling |
+| `CHATGPT_GATEWAY_ANTHROPIC_SYSTEM_CACHE_TTL` | `5m`; `off` and `1h` also supported |
+| `CHATGPT_GATEWAY_ACCEPT_ANTHROPIC_DATA_CONTROLS` | `0`; separate explicit policy exception, never inherited from ChatGPT |
 
 The server binds to `127.0.0.1`. Management and inference require the local key. Foreign browser origins are refused; this version supports local server/CLI clients rather than direct cross-origin browser applications. One server may use a data directory at a time, preventing refresh-token races.
 
-Concurrency limits model calls across all clients of this gateway process. The authenticated capability endpoint reports the configured `max_concurrency`. Callers should queue excess requests: an occupied gateway returns `429 gateway_busy` after one second. Application batch/job limits are separate and must also allow concurrent runs. OpenAI account limits still apply; this local setting does not increase account allowance.
+Concurrency limits model calls across all clients and **both providers combined** in this gateway process. The authenticated capability endpoint reports the configured `max_concurrency`. Callers should queue excess requests: an occupied gateway returns `429 gateway_busy` after one second. Application batch/job limits are separate and must also allow concurrent runs. Both providers' upstream account limits still apply; this local setting does not increase account allowance.
 
 ## Benchmarking
 
@@ -115,4 +136,4 @@ uv run pytest -q
 uv build
 ```
 
-Automated tests mock OpenAI; they cover protocol/SDK compatibility, signed OAuth identity checks, refresh rotation, local boundaries, and failure paths without consuming plan allowance. A successful local test suite does not establish that a particular real account or model can use this preview route. Account authorisation and a completed live probe are the remaining checks on a new installation.
+Automated tests mock OpenAI and Anthropic; they cover protocol/SDK compatibility, signed OAuth identity checks, refresh rotation, cache accounting, original-schema validation, shared concurrency, local boundaries and failure paths without consuming allowance or API credits. A successful local test suite does not establish that a particular real account or model can use either route. Configured credentials and a completed live probe remain necessary on a new installation.

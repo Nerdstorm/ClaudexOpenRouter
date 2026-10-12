@@ -16,9 +16,11 @@ from filelock import FileLock, Timeout
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
+from .anthropic_protocol import claude_request
+from .anthropic_upstream import ClaudeClient
 from .auth import Auth
 from .config import Settings
-from .errors import GatewayError
+from .errors import GatewayError, invalid
 from .protocol import Prepared, chat_request, completion, responses_request, usage_counts
 from .storage import Store, public_account
 from .upstream import PlanClient
@@ -76,7 +78,9 @@ def create_app(
                 follow_redirects=False,
             ) as client:
                 app.state.auth = Auth(store, client, settings.callback_uri)
-                app.state.plan = PlanClient(settings, store, app.state.auth, client)
+                slots = asyncio.Semaphore(settings.max_concurrency)
+                app.state.plan = PlanClient(settings, store, app.state.auth, client, slots=slots)
+                app.state.claude = ClaudeClient(settings, store, client, slots=slots)
                 yield
         finally:
             lock.release()
@@ -121,7 +125,9 @@ def create_app(
     async def handle_transport_error(request: Request, error: httpx.HTTPError):
         return JSONResponse(
             GatewayError(
-                502, "OpenAI is temporarily unreachable.", "upstream_connection_error"
+                502,
+                "The upstream provider is temporarily unreachable.",
+                "upstream_connection_error",
             ).payload(),
             status_code=502,
         )
@@ -151,7 +157,14 @@ def create_app(
     async def status(request: Request):
         authorize(request)
         account = store.active()
-        return {"active": public_account(account) if account else None, "version": __version__}
+        return {
+            "active": public_account(account) if account else None,
+            "version": __version__,
+            "anthropic": {
+                "configured": bool(settings.anthropic_api_key),
+                "billing_source": "anthropic_api",
+            },
+        }
 
     @app.get("/gateway/accounts")
     async def accounts(request: Request):
@@ -177,6 +190,27 @@ def create_app(
             "chat_web_search": "openrouter_native_subject_to_model_access",
             "data_controls": "chatgpt_account",
             "openrouter_data_policy_override_enabled": settings.accept_chatgpt_data_controls,
+            "providers": {
+                "chatgpt_plan": {"chat_completions": True, "responses": True},
+                "anthropic": {
+                    "configured": bool(settings.anthropic_api_key),
+                    "chat_completions": True,
+                    "responses": False,
+                    "structured_output": "json_schema",
+                    "image_input": False,
+                    "prompt_caching": {
+                        "ttl": ["5m", "1h"],
+                        "system_default": settings.anthropic_system_cache_ttl,
+                    },
+                    "max_tokens_default": settings.anthropic_max_tokens,
+                    "billing_source": "anthropic_api",
+                    "billing_controls": "claude_console",
+                    "included_credit_balance_verified": False,
+                    "openrouter_data_policy_override_enabled": (
+                        settings.accept_anthropic_data_controls
+                    ),
+                },
+            },
             "unsupported_parameters": [
                 "temperature",
                 "top_p",
@@ -184,6 +218,7 @@ def create_app(
                 "max_completion_tokens",
                 "seed",
             ],
+            "unsupported_parameters_scope": "chatgpt_plan",
         }
 
     @app.post("/gateway/accounts/select")
@@ -247,27 +282,45 @@ def create_app(
     @app.get("/api/v1/models")
     async def models(request: Request):
         authorize(request)
-        account = await app.state.auth.credentials()
-        return {"object": "list", "data": await app.state.plan.catalog(account, fresh=True)}
+        rows = []
+        if store.active() is not None or not settings.anthropic_api_key:
+            account = await app.state.auth.credentials()
+            rows.extend(await app.state.plan.catalog(account, fresh=True))
+        if settings.anthropic_api_key:
+            rows.extend(await app.state.claude.catalog(fresh=True))
+        return {"object": "list", "data": rows}
 
     async def infer(request: Request, *, chat: bool):
         authorize(request)
         body = await read_body(request, settings.max_request_bytes)
-        prepared = (
-            chat_request(body, accept_chatgpt_data_controls=settings.accept_chatgpt_data_controls)
-            if chat
-            else responses_request(body)
-        )
+        is_claude = isinstance(body.get("model"), str) and body["model"].startswith("anthropic/")
+        if is_claude:
+            if not chat:
+                raise invalid(
+                    "Claude is available through /v1/chat/completions, not /v1/responses.", "model"
+                )
+            prepared = claude_request(body, settings)
+            upstream = app.state.claude
+        else:
+            prepared = (
+                chat_request(
+                    body, accept_chatgpt_data_controls=settings.accept_chatgpt_data_controls
+                )
+                if chat
+                else responses_request(body)
+            )
+            upstream = app.state.plan
         request_id = uuid.uuid4().hex
-        events = app.state.plan.events(
+        events = upstream.events(
             prepared,
             request_id=request_id,
             endpoint="chat.completions" if chat else "responses",
             requested_model=body["model"],
             client_name=request.headers.get("x-title", "unspecified")[:100],
         )
-        headers = {"x-gateway-request-id": request_id, "x-gateway-provider": "chatgpt_plan"}
-        headers["x-gateway-data-controls"] = "chatgpt_account"
+        headers = {"x-gateway-request-id": request_id, "x-gateway-provider": prepared.provider}
+        headers["x-gateway-data-controls"] = "claude_console" if is_claude else "chatgpt_account"
+        headers["x-gateway-billing-source"] = "anthropic_api" if is_claude else "chatgpt_plan"
         if prepared.data_policy_override:
             headers["x-gateway-policy-override"] = "provider.data_collection"
         if not prepared.stream:

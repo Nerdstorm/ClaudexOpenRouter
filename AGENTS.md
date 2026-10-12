@@ -2,6 +2,8 @@
 
 - This gateway is standalone. Do not import another application's code or embed recipe-specific prompts.
 - Use the documented Sign in with ChatGPT public-client flow and public Responses API. Never read desktop/browser credentials or call private ChatGPT backend endpoints.
+- Claude uses the official Anthropic API with an explicitly configured API key, behind the same OpenRouter-compatible Chat interface. Keep vendor integration out of client applications. Included Claude credits and any purchased balance are controlled by Claude Console; never claim to verify a credit balance or change billing routes automatically.
+- Preserve caller cache markers and prompt ordering. The optional system-cache default may mark only the end of leading system/developer context, never infer boundaries inside application text. Preserve original JSON schemas for local validation when using Anthropic's documented schema transformation.
 - Keep account identity, issued client ID and token set together. Validate OAuth state, PKCE, signed identity and granted plan scopes. Refresh rotating credentials serially and write them atomically with owner-only permissions.
 - Never log credentials, authorization URLs, prompts, response bodies or schema contents. The request journal records identifiers, hashes, settings, status and usage only.
 - Preserve exact model selection and fail explicitly on unsupported parameters, missing grants, exhausted limits and interrupted streams. Do not add model or billing fallbacks.

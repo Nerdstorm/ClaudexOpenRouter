@@ -73,9 +73,17 @@ def decode_event(value: str) -> dict:
 
 
 class PlanClient:
-    def __init__(self, settings: Settings, store: Store, auth: Auth, client: httpx.AsyncClient):
+    def __init__(
+        self,
+        settings: Settings,
+        store: Store,
+        auth: Auth,
+        client: httpx.AsyncClient,
+        *,
+        slots: asyncio.Semaphore | None = None,
+    ):
         self.settings, self.store, self.auth, self.client = settings, store, auth, client
-        self._slots = asyncio.Semaphore(settings.max_concurrency)
+        self._slots = slots if slots is not None else asyncio.Semaphore(settings.max_concurrency)
         self._catalog: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
     async def catalog(self, account: dict, *, fresh: bool = False) -> list[dict]:
@@ -140,6 +148,7 @@ class PlanClient:
         upstream_id = None
         account = None
         began = False
+        first_token_ms = None
         actual_model = prepared.body["model"]
         completed_items: dict[int, dict] = {}
         try:
@@ -162,6 +171,8 @@ class PlanClient:
                         "model": actual_model,
                         "client": client_name,
                         "account": account["id"],
+                        "provider": "chatgpt_plan",
+                        "billing_source": "chatgpt_plan",
                         "body_sha256": hashlib.sha256(
                             json.dumps(prepared.body, sort_keys=True).encode()
                         ).hexdigest(),
@@ -199,6 +210,8 @@ class PlanClient:
                         )
                     async for event in sse_events(response):
                         kind = event["type"]
+                        if kind == "response.output_text.delta" and first_token_ms is None:
+                            first_token_ms = round((time.monotonic() - started) * 1000)
                         if kind == "response.output_item.done":
                             index, item = event.get("output_index"), event.get("item")
                             if type(index) is not int or index < 0 or not isinstance(item, dict):
@@ -294,7 +307,10 @@ class PlanClient:
                         "model": actual_model,
                         "requested_model": requested_model,
                         "account": account["id"] if account else None,
+                        "provider": "chatgpt_plan",
+                        "billing_source": "chatgpt_plan",
                         "duration_ms": round((time.monotonic() - started) * 1000),
+                        "first_token_ms": first_token_ms,
                         "upstream_request_id": upstream_id,
                         "usage": usage,
                         "data_policy_override": prepared.data_policy_override,

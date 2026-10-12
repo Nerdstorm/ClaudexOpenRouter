@@ -113,6 +113,10 @@ class Store:
             "stream",
             "error_param",
             "data_policy_override",
+            "provider",
+            "billing_source",
+            "cache_policy",
+            "first_token_ms",
         }
         if set(event) - allowed:
             raise ValueError("Unexpected journal field")

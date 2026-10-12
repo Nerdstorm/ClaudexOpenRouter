@@ -7,8 +7,13 @@ flowchart LR
     C[Application or benchmark] -->|Local bearer key| G[Loopback API]
     G --> P[Protocol validation and translation]
     P --> T[PlanClient]
+    P --> CAPI[ClaudeClient]
     T -->|Account-specific OAuth bearer| R[Public OpenAI Responses API]
+    CAPI -->|Configured Console API key| AR[Official Anthropic Messages API]
     T --> J[Metadata journal]
+    CAPI --> J
+    L[Shared concurrency limit] --> T
+    L --> CAPI
     A[Account and token manager] --> T
     A --> S[Protected local store]
     B[System browser] -->|State-protected callback| A
@@ -24,6 +29,8 @@ The gateway owns HTTP compatibility, account permissions and transport. Client a
 | `storage.py` | Atomic private account records, stable host identity, active selection, metadata journal |
 | `auth.py` | Public-client registration, PKCE/state/nonce, signed identity validation, granted scopes, serialized renewal and sign-out |
 | `protocol.py` | Supported request subset, Chat-to-Responses translation, JSON-schema validation, response conversion |
+| `anthropic_protocol.py` | Explicit OpenRouter-to-Claude model mapping, portable cache controls, schema transformation, native usage normalization |
+| `anthropic_upstream.py` | Real Anthropic catalogue, no-retry SDK transport, terminal/model validation, provider-labelled cache/latency journal |
 | `upstream.py` | Account catalog, model admission, bounded concurrency, public HTTP/SSE, terminal validation and journal outcomes |
 | `app.py` | Local authentication, host/origin boundary, body limits, routes and streaming adaptation |
 | `cli.py` | Server lifecycle, browser sign-in and local management commands |
@@ -45,7 +52,7 @@ Official contracts: [sign-in](https://developers.openai.com/siwc/token-sharing-o
 
 After local validation, the server acquires a concurrency slot, obtains renewable credentials, and checks the exact model against the selected account's catalog. Catalogs used for inference are cached for 60 seconds per registration; external model-list requests refresh them. A listing is not an access guarantee.
 
-Every upstream inference uses `POST https://api.openai.com/v1/responses`, `store:false`, and `stream:true`. The client sends all required history. Nonstreaming clients receive an object only after `response.completed`; streaming clients receive events/chunks, and a finish marker is emitted only after validated completion. JSON-format requests are checked locally at completion. Refusals retain their own representation.
+Every OpenAI upstream inference uses `POST https://api.openai.com/v1/responses`, `store:false`, and `stream:true`. The client sends all required history. Nonstreaming clients receive an object only after `response.completed`; streaming clients receive events/chunks, and a finish marker is emitted only after validated completion. JSON-format requests are checked locally at completion. Refusals retain their own representation.
 
 The live plan route has returned valid SSE bodies without a `Content-Type` header. When that header is absent, the gateway parses the body as SSE and still requires the same validated terminal event. A supplied media type must be `text/event-stream` (case-insensitive, with optional parameters); empty, incomplete or malformed bodies still fail.
 
@@ -54,6 +61,20 @@ The route has also returned an empty terminal `output` list after supplying the 
 HTTP errors preserve upstream status, body shape, code, parameter, retry hint and request ID where supplied. Known plan errors inside SSE use the statuses documented by OpenAI. Interrupted, incomplete, malformed or mismatched-model results fail. There is no automatic inference retry or model fallback.
 
 Admitted attempts have a `started` event and a terminal `completed`, `failed` or `interrupted` event with actual model, elapsed time, request ID and usage when available. Credential/model preflight failures are returned to the caller before a journal attempt begins. Validation failures are not recorded as model executions. Response usage remains unknown when the upstream omits it.
+
+## Claude routing, caching and billing
+
+The same Chat endpoint selects Claude only for an explicit supported `anthropic/...` model id. Claude API credentials are configured independently from renewable ChatGPT credentials. They are read from the server environment or an owner-only key file, never from Claude Code, browser cookies or desktop storage. There is no subscription OAuth proxy or agent harness. `GET /models` combines the real configured-provider catalogues; Claude can operate without a ChatGPT login. A failing configured-provider catalogue is reported rather than silently replaced. Both transports acquire the same global semaphore, so the 12-call limit cannot become 24 calls by enabling a second provider.
+
+`ClaudeClient` uses the official Anthropic SDK with retries disabled and the shared HTTP client, serving `POST https://api.anthropic.com/v1/messages`. The gateway accepts only the documented text/schema subset. A required output ceiling is explicit per request or supplied by the disclosed Claude default. The SDK reconstructs messages; the gateway additionally requires message start/delta/stop, complete content blocks, exact model identity and an accepted stop reason. Truncation, fallback/tool blocks, wrong models and interrupted streams fail. Stream errors with HTTP 200 must never turn into a successful response. Refusals are returned separately and journalled as `refused`.
+
+Internally, finalized Claude output is normalized into the same small response/event shape used by the existing Chat adapter. `/v1/responses` remains OpenAI-only; this internal reuse does not claim Anthropic Responses API parity. Anthropic's supported schema transformation is used while retaining the original schema for local validation, so unsupported native numerical/string constraints still matter to acceptance.
+
+Explicit OpenRouter caching markers and TTLs are preserved. The optional default marks only the final leading system/developer block when the caller has supplied no cache controls; it never parses application text, reorders messages, pads prompts, caches changing user suffixes or adds warm-up calls. Root-level null and the server's `off` setting disable this default. First-response availability, exact prefixes, minimum sizes and TTLs still determine actual cache reuse. Native fresh/read/write tokens are normalized without double counting, and missing fields remain unknown. Journal metadata includes provider, API billing source, cache TTL policy, time to first text and total duration, without prompt/schema/answer content.
+
+API keys charge the linked Console organization. Eligible included credits may cover those calls, but the gateway cannot verify balances or stop precisely at the boundary between promotional and purchased credits. Console workspace limits and billing settings control that. This is not a fallback from OpenAI: the caller explicitly selected a Claude model and its Anthropic API route. Provider-specific OpenRouter data-policy exceptions are independent and off by default. Switching a client to OpenRouter changes URL/key, provider billing and potentially cache warmth, while preserving supported client-side request shapes.
+
+Contracts: [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), and [OpenRouter cache controls](https://openrouter.ai/docs/guides/best-practices/prompt-caching). Architecture decision: Workstate `chatgpt-plan-gateway-0008`.
 
 ## Local files and lifecycle
 
@@ -65,6 +86,7 @@ The default data directory is `~/.local/share/chatgpt-plan-gateway` with mode `0
 - `requests.jsonl`: append-only inference metadata (`0600`).
 - `state.lock`: serializes atomic state writes.
 - `gateway.lock`: held for the running service's lifetime.
+- `anthropic-api-key`: optional user-supplied Claude Console key (`0600`); an environment key or explicit external key-file path may be used instead.
 
 These files are local runtime data, not a database or source-controlled configuration. They are not encrypted at rest; protection is the operating-system user boundary and file permissions. No code reads desktop authentication or browser cookies. Logs exclude request/answer content and credentials; HTTP access logs remain off to protect OAuth codes.
 

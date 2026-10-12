@@ -47,7 +47,7 @@ def model_slug(value: Any) -> str:
 def unknown_fields(body: dict, allowed: set[str]) -> None:
     unknown = next((key for key in body if key not in allowed and body[key] is not None), None)
     if unknown:
-        raise invalid(f"{unknown} is not supported by this ChatGPT-plan route.", unknown)
+        raise invalid(f"{unknown} is not supported by this gateway route.", unknown)
 
 
 def local_schema_references(value: Any) -> None:
@@ -64,7 +64,13 @@ def local_schema_references(value: Any) -> None:
             local_schema_references(child)
 
 
-def provider_preferences(preferences: Any, *, accept_chatgpt_data_controls: bool = False) -> bool:
+def provider_preferences(
+    preferences: Any,
+    *,
+    accept_chatgpt_data_controls: bool = False,
+    provider_name: str = "openai",
+    data_controls: str = "ChatGPT",
+) -> bool:
     """Validate pins; return whether the operator explicitly overrides the data policy."""
     if preferences is None:
         return False
@@ -75,10 +81,8 @@ def provider_preferences(preferences: Any, *, accept_chatgpt_data_controls: bool
     for name in ("allow_fallbacks", "require_parameters"):
         if preferences.get(name) is not None and not isinstance(preferences[name], bool):
             raise invalid(f"provider.{name} must be a boolean.", f"provider.{name}")
-    if "only" in preferences and preferences["only"] != ["openai"]:
-        raise invalid(
-            "This gateway has only the connected OpenAI ChatGPT-plan route.", "provider.only"
-        )
+    if "only" in preferences and preferences["only"] != [provider_name]:
+        raise invalid(f"This model requires the {provider_name} route.", "provider.only")
     if preferences.get("allow_fallbacks") is True:
         raise invalid("Provider fallback is unavailable.", "provider.allow_fallbacks")
     if preferences.get("data_collection") == "deny" and accept_chatgpt_data_controls:
@@ -86,7 +90,8 @@ def provider_preferences(preferences: Any, *, accept_chatgpt_data_controls: bool
     if preferences.get("data_collection") not in (None, "allow"):
         raise invalid(
             "The gateway cannot attest an OpenRouter data-collection policy. "
-            "Manage data controls in ChatGPT or use the provider that fulfils that requirement.",
+            f"Manage data controls in {data_controls} "
+            "or use a provider that fulfils that requirement.",
             "provider.data_collection",
         )
     return False
@@ -194,6 +199,7 @@ class Prepared:
     include_usage: bool = False
     schema: dict | None = None
     data_policy_override: bool = False
+    provider: str = "chatgpt_plan"
 
 
 def chat_request(body: dict[str, Any], *, accept_chatgpt_data_controls: bool = False) -> Prepared:
@@ -424,7 +430,7 @@ def completion(response: dict, request_id: str, requested_model: str) -> dict:
         "object": "chat.completion",
         "created": response.get("created_at", 0),
         "model": served_model,
-        "provider": "chatgpt_plan",
+        "provider": response.get("gateway_provider", "chatgpt_plan"),
         "choices": [{"index": 0, "message": assistant_message(response), "finish_reason": "stop"}],
         "usage": usage_counts(response.get("usage"), response),
     }

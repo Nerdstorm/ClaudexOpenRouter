@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chatgpt-plan-gateway"
-version = "0.1.0"
-description = "A local OpenAI-compatible gateway using an authorised ChatGPT plan connection"
+version = "0.2.0"
+description = "A local OpenRouter-compatible gateway for ChatGPT-plan and Claude API calls"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
   "PyJWT[crypto]>=2.10,<3",
   "jsonschema>=4.23,<5",
   "filelock>=3.18,<4",
+  "anthropic>=0.125,<1",
 ]
 
 [project.scripts]
