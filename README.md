@@ -119,6 +119,9 @@ original schema as a formatting instruction and validates the completed JSON aga
 including required fields, types, enum values and numerical constraints. Invalid or incomplete
 answers fail. This mode is explicit and disclosed in capabilities, response headers and the
 request journal; no automatic mode switch, extra model call or provider fallback is introduced.
+The JSON format contract is a system instruction after caller context. Completed invalid answers
+return HTTP 422 with bounded validation reasons and usage, allowing the client's correction loop
+to ask again explicitly. Both the mode and instruction version are recorded.
 It changes the model's formatting context, so record it when comparing benchmarks. The native
 mode remains the default. See [the compatibility contract](docs/compatibility.md#claude-chat-completions-input).
 

@@ -12,6 +12,7 @@ class GatewayError(Exception):
         body: dict[str, Any] | None = None,
         request_id: str | None = None,
         retry_after: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -21,6 +22,7 @@ class GatewayError(Exception):
         self.body = body
         self.request_id = request_id
         self.retry_after = retry_after
+        self.headers = headers or {}
 
     def payload(self) -> dict[str, Any]:
         if self.body is not None:

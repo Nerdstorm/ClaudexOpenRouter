@@ -16,7 +16,7 @@ from filelock import FileLock, Timeout
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
-from .anthropic_protocol import claude_request
+from .anthropic_protocol import JSON_INSTRUCTION_VERSION, claude_request
 from .anthropic_upstream import ClaudeClient
 from .auth import Auth
 from .config import Settings
@@ -27,12 +27,23 @@ from .upstream import PlanClient
 
 
 def error_headers(error: GatewayError) -> dict[str, str]:
-    headers = {}
+    headers = dict(error.headers)
     if error.request_id:
         headers["x-upstream-request-id"] = error.request_id
     if error.retry_after:
         headers["retry-after"] = error.retry_after
     return headers
+
+
+async def annotated_events(events, headers):
+    try:
+        async for event in events:
+            yield event
+    except GatewayError as error:
+        error.headers.update(headers)
+        raise
+    finally:
+        await events.aclose()
 
 
 def sse(value: dict | str) -> bytes:
@@ -201,6 +212,9 @@ def create_app(
                     "responses": False,
                     "structured_output": "json_schema",
                     "structured_output_mode": settings.anthropic_structured_output,
+                    "structured_output_version": JSON_INSTRUCTION_VERSION
+                    if settings.anthropic_structured_output == "validated_json"
+                    else None,
                     "image_input": False,
                     "prompt_caching": {
                         "ttl": ["5m", "1h"],
@@ -327,8 +341,11 @@ def create_app(
         headers["x-gateway-billing-source"] = "anthropic_api" if is_claude else "chatgpt_plan"
         if prepared.structured_output_mode:
             headers["x-gateway-structured-output-mode"] = prepared.structured_output_mode
+        if prepared.structured_output_version:
+            headers["x-gateway-structured-output-version"] = prepared.structured_output_version
         if prepared.data_policy_override:
             headers["x-gateway-policy-override"] = "provider.data_collection"
+        events = annotated_events(events, headers)
         if not prepared.stream:
             try:
                 async for event in events:

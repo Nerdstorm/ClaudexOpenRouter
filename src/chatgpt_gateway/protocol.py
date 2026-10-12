@@ -1,8 +1,9 @@
 import json
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
-from jsonschema import Draft202012Validator, SchemaError, ValidationError
+from jsonschema import Draft202012Validator, SchemaError
 
 from .errors import GatewayError, invalid
 
@@ -201,6 +202,7 @@ class Prepared:
     data_policy_override: bool = False
     provider: str = "chatgpt_plan"
     structured_output_mode: str | None = None
+    structured_output_version: str | None = None
 
 
 def chat_request(body: dict[str, Any], *, accept_chatgpt_data_controls: bool = False) -> Prepared:
@@ -408,6 +410,25 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError("Non-JSON numeric constant")
 
 
+def _schema_failure(details: list[dict]) -> GatewayError:
+    # Returned to the authenticated caller, never journaled. No instance values,
+    # complete schema, model reply or jsonschema exception message is included.
+    return GatewayError(
+        502,
+        "The model's completed answer did not match the requested JSON format.",
+        "schema_validation_failed",
+        body={
+            "error": {
+                "message": "The model's completed answer did not match the requested JSON format.",
+                "type": "gateway_error",
+                "code": "schema_validation_failed",
+                "param": "response_format",
+                "validation_errors": details,
+            }
+        },
+    )
+
+
 def validate_output(response: dict, schema: dict | None) -> None:
     if not schema or schema["type"] == "text":
         return
@@ -416,14 +437,24 @@ def validate_output(response: dict, schema: dict | None) -> None:
         return
     try:
         value = json.loads(message.get("content") or "", parse_constant=_reject_json_constant)
-        if schema["type"] == "json_schema":
-            Draft202012Validator(schema["schema"]).validate(value)
-    except (ValueError, ValidationError) as error:
-        raise GatewayError(
-            502,
-            "The model's completed answer did not match the requested JSON format.",
-            "schema_validation_failed",
-        ) from error
+    except ValueError as error:
+        detail = {"path": [], "validator": "json_syntax"}
+        if isinstance(error, json.JSONDecodeError):
+            detail.update(line=error.lineno, column=error.colno)
+        raise _schema_failure([detail]) from error
+    if schema["type"] == "json_schema":
+        details = []
+        for error in islice(Draft202012Validator(schema["schema"]).iter_errors(value), 8):
+            detail = {"path": list(error.absolute_path), "validator": error.validator}
+            if error.validator == "type":
+                detail["expected_type"] = error.validator_value
+            elif error.validator == "required":
+                detail["missing_fields"] = [
+                    key for key in error.validator_value if key not in error.instance
+                ][:8]
+            details.append(detail)
+        if details:
+            raise _schema_failure(details)
 
 
 def completion(response: dict, request_id: str, requested_model: str) -> dict:

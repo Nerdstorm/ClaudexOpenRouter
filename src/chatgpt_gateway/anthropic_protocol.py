@@ -16,6 +16,7 @@ CLAUDE_MODELS = {
     "anthropic/claude-opus-5.5": ("claude-opus-5-5", "Claude Opus 5.5"),
 }
 CLAUDE_FIELDS = CHAT_FIELDS | {"cache_control", "max_tokens", "max_completion_tokens"}
+JSON_INSTRUCTION_VERSION = "validated-json.v2"
 
 
 def cache_control(value: Any) -> dict | None:
@@ -184,14 +185,16 @@ def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
             }
         else:
             # Explicit operator mode for schemas too large for Anthropic's grammar.
-            # Append a separate block: preserve every caller block and cache boundary.
-            # Keep insertion order, because applications may plan before writing.
-            messages[-1]["content"].append(
+            # The format is a protocol instruction, above the user's task. Append it
+            # after caller system blocks, without moving any caller/cache boundary.
+            system.append(
                 {
                     "type": "text",
                     "text": (
-                        "Return only one JSON value that conforms to the following JSON Schema. "
+                        "You are a JSON API. Your entire final answer must be one JSON value "
+                        "that conforms to the following JSON Schema. "
                         "Do not include markdown fences, a preamble or trailing commentary. "
+                        "Encode strings as JSON strings, escaping embedded quotes and newlines. "
                         "Follow the order of properties in each schema object when writing "
                         "the JSON. Include every required property and respect all constraints.\n"
                         + json.dumps(
@@ -200,6 +203,7 @@ def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
                     ),
                 }
             )
+            upstream["system"] = system
     if effort:
         output_config["effort"] = effort
         upstream["thinking"] = {"type": "adaptive"}
@@ -213,6 +217,9 @@ def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
         data_policy_override=overridden,
         provider="anthropic",
         structured_output_mode=structured_mode,
+        structured_output_version=JSON_INSTRUCTION_VERSION
+        if structured_mode == "validated_json"
+        else None,
     )
 
 

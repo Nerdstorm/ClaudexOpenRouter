@@ -367,20 +367,24 @@ def test_explicit_validated_json_keeps_full_schema_order_and_records_mode(
     )
     assert raw.parse().choices[0].message.parsed.plan.amount == 2
     assert raw.headers["x-gateway-structured-output-mode"] == "validated_json"
+    assert raw.headers["x-gateway-structured-output-version"] == "validated-json.v2"
     post = json.loads(claude_backend.requests[-1].content)
     assert "format" not in post["output_config"]
     assert post["output_config"]["effort"] == "high"
     assert post["messages"][-1]["content"][0]["text"] == REQUEST["messages"][-1]["content"]
-    instruction = post["messages"][-1]["content"][-1]["text"]
+    assert len(post["messages"][-1]["content"]) == 1
+    instruction = post["system"][-1]["text"]
     schema = json.loads(instruction.split("\n", 1)[1])
     assert list(schema["properties"]) == ["plan", "items", "state", "optional"]
     assert schema["$defs"]["Part"]["properties"]["amount"]["minimum"] == 1
     assert schema["properties"]["state"]["const"] == "ok"
     assert set(schema["required"]) == set(schema["properties"])
-    assert post["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert post["system"][-2]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert "cache_control" not in post["system"][-1]
     assert not backend.requests
     events = store.recent()
     assert all(e["structured_output_mode"] == "validated_json" for e in events)
+    assert all(e["structured_output_version"] == "validated-json.v2" for e in events)
     assert events[-1]["event"] == "completed"
     assert instruction not in json.dumps(events) and "minimum" not in json.dumps(events)
     cap = claude_client.get("/gateway/capabilities").json()["providers"]["anthropic"]
@@ -437,8 +441,13 @@ def test_validated_json_rejects_invalid_completed_answers_without_retry(
         assert "schema_validation_failed" in response.text
         assert '"finish_reason": "stop"' not in response.text
     else:
-        assert response.status_code == 502
+        assert response.status_code == 422
         assert response.json()["error"]["code"] == "schema_validation_failed"
+        assert response.json()["error"]["validation_errors"]
+        assert response.json()["usage"]["prompt_tokens"] == 3010
+        assert response.headers["x-gateway-structured-output-mode"] == "validated_json"
+        assert response.headers["x-gateway-structured-output-version"] == "validated-json.v2"
+        assert response.headers["x-upstream-request-id"] == "claude-id"
     assert store.recent()[-1]["event"] == "failed"
     assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
     assert not backend.requests
@@ -457,9 +466,43 @@ def test_validated_json_preserves_explicit_cache_boundaries_and_caller_objects(s
     prepared = claude_request(body, replace(settings, anthropic_structured_output="validated_json"))
     assert body == before
     assert prepared.body["messages"][-1]["content"][0] == body["messages"][-1]["content"][0]
-    assert "cache_control" not in prepared.body["messages"][-1]["content"][-1]
+    assert len(prepared.body["messages"][-1]["content"]) == 1
+    assert "cache_control" not in prepared.body["system"][-1]
     assert "cache_control" not in prepared.body["system"][0]
     assert prepared.schema == body["response_format"]["json_schema"] | {"type": "json_schema"}
+
+
+@pytest.mark.parametrize("claude_client", ["validated_json"], indirect=True)
+def test_validation_diagnostics_never_echo_the_answer_or_schema(
+    claude_client, claude_backend, store
+):
+    claude_backend.text = '{"amount":"private-answer","extra":"another-private-value"}'
+    response = claude_client.post(
+        "/api/v1/chat/completions",
+        json={
+            **REQUEST,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "Answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"amount": {"type": "integer"}},
+                        "required": ["amount"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        },
+    )
+    assert response.status_code == 422
+    issues = response.json()["error"]["validation_errors"]
+    assert issues[0] == {"path": ["amount"], "validator": "type", "expected_type": "integer"}
+    assert issues[1]["validator"] == "additionalProperties"
+    for private in ["private-answer", "another-private-value", "A new question", '"schema":']:
+        assert private not in response.text
+        assert private not in json.dumps(store.recent())
+    assert "validation_errors" not in json.dumps(store.recent())
 
 
 def test_schema_compilation_error_is_safe_actionable_and_keeps_request_id(

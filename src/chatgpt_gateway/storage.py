@@ -117,6 +117,7 @@ class Store:
             "billing_source",
             "cache_policy",
             "structured_output_mode",
+            "structured_output_version",
             "first_token_ms",
         }
         if set(event) - allowed:

@@ -12,7 +12,7 @@ import httpx
 from .anthropic_protocol import CLAUDE_MODELS, cache_policy, claude_usage
 from .config import Settings
 from .errors import GatewayError
-from .protocol import Prepared, validate_output
+from .protocol import Prepared, usage_counts, validate_output
 from .storage import Store
 
 ERROR_STATUS = {
@@ -170,6 +170,7 @@ class ClaudeClient:
                         "cache_policy": cache_policy(prepared.body),
                         "data_policy_override": prepared.data_policy_override,
                         "structured_output_mode": prepared.structured_output_mode,
+                        "structured_output_version": prepared.structured_output_version,
                     }
                 )
                 began = True
@@ -299,7 +300,21 @@ class ClaudeClient:
                         "output": [{"type": "message", "role": "assistant", "content": [content]}],
                         "usage": claude_usage(usage),
                     }
-                    validate_output(result, prepared.schema)
+                    try:
+                        validate_output(result, prepared.schema)
+                    except GatewayError as failure:
+                        if failure.code == "schema_validation_failed":
+                            # A completed bad answer needs a corrected request, not a
+                            # transport retry of the same prompt. Keep the billed usage.
+                            failure.status = 422
+                            failure.request_id = upstream_id
+                            failure.body["error"]["type"] = "model_output_error"
+                            failure.body.update(
+                                provider="anthropic",
+                                model=requested_model,
+                                usage=usage_counts(result["usage"], result),
+                            )
+                        raise
                     outcome, status = "completed", 200
                     if message.stop_reason == "refusal":
                         outcome, code = "refused", "model_refusal"
@@ -339,5 +354,6 @@ class ClaudeClient:
                         "usage": claude_usage(usage),
                         "data_policy_override": prepared.data_policy_override,
                         "structured_output_mode": prepared.structured_output_mode,
+                        "structured_output_version": prepared.structured_output_version,
                     }
                 )

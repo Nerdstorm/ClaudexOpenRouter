@@ -81,19 +81,31 @@ and upstream request ID; native error text is not copied into the response or jo
 
 An operator may select `validated_json` when the native compiler cannot support the contract.
 The Chat `response_format` and completed response shape stay the same. The gateway appends a
-separate block to the final user message containing a JSON-only instruction and the complete
-original schema, preserving property insertion order and all original caller blocks/cache
+separate system block after caller system context containing a JSON-only instruction and the
+complete original schema, preserving property insertion order and all original caller blocks/cache
 markers. It sends no native `output_config.format`. Before success, the unchanged original
 schema validates the completed JSON, including required fields, additional-property rules,
 enum values, types and constraints. Invalid JSON, refusals, truncation and incomplete streams
 retain their existing outcomes; failures cause no gateway retry or model fallback.
 
-Capabilities report `providers.anthropic.structured_output_mode`. Schema requests disclose
+Capabilities report `providers.anthropic.structured_output_mode` and `structured_output_version`.
+Schema requests disclose
 `x-gateway-structured-output-mode: native|validated_json`, and both started/terminal journal
-events record `structured_output_mode`. Text requests leave the mode null. The format block
+events record `structured_output_mode`. Validated JSON also discloses
+`x-gateway-structured-output-version` and journals the instruction version (`validated-json.v2`).
+Text requests leave these fields null. The format block
 is model context and affects tokens and benchmark comparability; this is not native grammar
 enforcement. Mode selection is fixed at server startup; a native failure never silently
 switches to validated JSON. The OpenAI route is unaffected.
+
+A completed Claude answer that fails JSON/schema validation returns HTTP **422** with
+`schema_validation_failed`, at most eight `validation_errors` (paths, rule names and type/missing-field
+hints), normalized token usage and the usual route/version headers. Invalid answers and schema
+contents are not included in this error. This is a model-output failure, not a transient server
+failure: a caller can use the reasons in its bounded correction loop rather than a transport
+retry of the unchanged prompt. The gateway sends no additional inference request. Streaming
+clients get the same diagnostic error without a successful finish marker; the journal records
+failure and usage, without diagnostic paths or reply contents.
 
 ## Native Responses input
 
