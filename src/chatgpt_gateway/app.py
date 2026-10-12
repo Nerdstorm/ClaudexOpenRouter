@@ -200,6 +200,7 @@ def create_app(
                     "chat_completions": True,
                     "responses": False,
                     "structured_output": "json_schema",
+                    "structured_output_mode": settings.anthropic_structured_output,
                     "image_input": False,
                     "prompt_caching": {
                         "ttl": ["5m", "1h"],
@@ -324,6 +325,8 @@ def create_app(
         headers = {"x-gateway-request-id": request_id, "x-gateway-provider": prepared.provider}
         headers["x-gateway-data-controls"] = "claude_console" if is_claude else "chatgpt_account"
         headers["x-gateway-billing-source"] = "anthropic_api" if is_claude else "chatgpt_plan"
+        if prepared.structured_output_mode:
+            headers["x-gateway-structured-output-mode"] = prepared.structured_output_mode
         if prepared.data_policy_override:
             headers["x-gateway-policy-override"] = "provider.data_collection"
         if not prepared.stream:

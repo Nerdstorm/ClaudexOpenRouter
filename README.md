@@ -108,9 +108,19 @@ All commands use the same environment settings. Put `--port` before the command 
 | `CHATGPT_GATEWAY_ANTHROPIC_API_KEY_FILE` | `<data directory>/anthropic-api-key` (owner-only, optional) |
 | `CHATGPT_GATEWAY_ANTHROPIC_MAX_TOKENS` | `32768`; used only when a Claude request omits its ceiling |
 | `CHATGPT_GATEWAY_ANTHROPIC_SYSTEM_CACHE_TTL` | `5m`; `off` and `1h` also supported |
+| `CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT` | `native`; explicit `validated_json` mode supports larger schemas with full local validation |
 | `CHATGPT_GATEWAY_ACCEPT_ANTHROPIC_DATA_CONTROLS` | `0`; separate explicit policy exception, never inherited from ChatGPT |
 
 The server binds to `127.0.0.1`. Management and inference require the local key. Foreign browser origins are refused; this version supports local server/CLI clients rather than direct cross-origin browser applications. One server may use a data directory at a time, preventing refresh-token races.
+
+For a Claude schema that exceeds Anthropic's native grammar limits, start the server with
+`CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT=validated_json`. The gateway then appends the
+original schema as a formatting instruction and validates the completed JSON against it,
+including required fields, types, enum values and numerical constraints. Invalid or incomplete
+answers fail. This mode is explicit and disclosed in capabilities, response headers and the
+request journal; no automatic mode switch, extra model call or provider fallback is introduced.
+It changes the model's formatting context, so record it when comparing benchmarks. The native
+mode remains the default. See [the compatibility contract](docs/compatibility.md#claude-chat-completions-input).
 
 Concurrency limits model calls across all clients and **both providers combined** in this gateway process. The authenticated capability endpoint reports the configured `max_concurrency`. Callers should queue excess requests: an occupied gateway returns `429 gateway_busy` after one second. Application batch/job limits are separate and must also allow concurrent runs. Both providers' upstream account limits still apply; this local setting does not increase account allowance.
 

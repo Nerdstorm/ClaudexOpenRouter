@@ -72,6 +72,29 @@ The same global concurrency pool limits both providers combined. Anthropic SDK r
 
 `provider.only:["anthropic"]`, `allow_fallbacks:false` and `require_parameters` are validated. `provider.data_collection:"deny"` remains refused by default because the gateway cannot attest OpenRouter's policy contract. An explicit `CHATGPT_GATEWAY_ACCEPT_ANTHROPIC_DATA_CONTROLS=1` exception accepts Claude Console controls instead and marks affected responses and journal entries. This is separate from the ChatGPT exception; enabling one never enables the other. The gateway does not inspect or change Console training/retention or billing settings.
 
+### Explicit structured-output modes
+
+`CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT=native` is the default. It uses Anthropic's
+schema transformation and native grammar, then validates against the client's original schema.
+Known grammar-size rejections return `400 schema_compilation_limit`, with a safe explanation
+and upstream request ID; native error text is not copied into the response or journal.
+
+An operator may select `validated_json` when the native compiler cannot support the contract.
+The Chat `response_format` and completed response shape stay the same. The gateway appends a
+separate block to the final user message containing a JSON-only instruction and the complete
+original schema, preserving property insertion order and all original caller blocks/cache
+markers. It sends no native `output_config.format`. Before success, the unchanged original
+schema validates the completed JSON, including required fields, additional-property rules,
+enum values, types and constraints. Invalid JSON, refusals, truncation and incomplete streams
+retain their existing outcomes; failures cause no gateway retry or model fallback.
+
+Capabilities report `providers.anthropic.structured_output_mode`. Schema requests disclose
+`x-gateway-structured-output-mode: native|validated_json`, and both started/terminal journal
+events record `structured_output_mode`. Text requests leave the mode null. The format block
+is model context and affects tokens and benchmark comparability; this is not native grammar
+enforcement. Mode selection is fixed at server startup; a native failure never silently
+switches to validated JSON. The OpenAI route is unaffected.
+
 ## Native Responses input
 
 Accepted top-level fields are `model`, `input`, `instructions`, `stream`, `store`, `reasoning`, `text`, `tools`, `tool_choice`, `parallel_tool_calls`, and `include`. A string input is wrapped as a user message; an explicit system-role input becomes developer-role input. Other native input items are passed to OpenAI for validation and model/policy admission.

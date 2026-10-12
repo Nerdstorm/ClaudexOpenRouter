@@ -2,6 +2,7 @@ import asyncio
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from typing import Literal
 
 import httpx
 import pytest
@@ -69,6 +70,8 @@ class ClaudeBackend:
     events: list | None = None
     status: int = 200
     text: str = "Hello"
+    error_type: str = "rate_limit_error"
+    error_message: str = "Limited"
     available: list = field(default_factory=lambda: [v[0] for v in CLAUDE_MODELS.values()])
     requests: list = field(default_factory=list)
 
@@ -99,7 +102,10 @@ class ClaudeBackend:
         if self.status != 200:
             return httpx.Response(
                 self.status,
-                json={"type": "error", "error": {"type": "rate_limit_error", "message": "Limited"}},
+                json={
+                    "type": "error",
+                    "error": {"type": self.error_type, "message": self.error_message},
+                },
                 headers={"request-id": "claude-id", "retry-after": "7"},
             )
         model = json.loads(request.content)["model"]
@@ -117,8 +123,12 @@ def claude_backend():
 
 
 @pytest.fixture
-def claude_client(settings, store, backend, claude_backend):
-    configured = replace(settings, anthropic_api_key="test-anthropic-secret")
+def claude_client(settings, store, backend, claude_backend, request):
+    configured = replace(
+        settings,
+        anthropic_api_key="test-anthropic-secret",
+        anthropic_structured_output=getattr(request, "param", "native"),
+    )
 
     def handle(request):
         if request.url.host == "api.anthropic.com":
@@ -324,6 +334,159 @@ def test_schema_transformation_preserves_local_constraints_and_sdk_parse(
             model=MODEL, messages=REQUEST["messages"], response_format=Answer
         )
     assert "schema_validation_failed" in str(failure.value)
+
+
+@pytest.mark.parametrize("claude_client", ["validated_json"], indirect=True)
+def test_explicit_validated_json_keeps_full_schema_order_and_records_mode(
+    claude_client, claude_backend, store, backend
+):
+    class Part(BaseModel):
+        label: str
+        amount: int = Field(ge=1)
+
+    class Answer(BaseModel):
+        plan: Part
+        items: list[Part]
+        state: Literal["ok"]
+        optional: Part | None
+
+    claude_backend.text = json.dumps(
+        {"plan": {"label": "a", "amount": 2}, "items": [], "state": "ok", "optional": None}
+    )
+    sdk = OpenAI(
+        base_url=str(claude_client.base_url).rstrip("/") + "/api/v1",
+        api_key=store.api_key,
+        max_retries=0,
+        http_client=claude_client,
+    )
+    raw = sdk.chat.completions.with_raw_response.parse(
+        model=MODEL,
+        messages=REQUEST["messages"],
+        response_format=Answer,
+        reasoning_effort="high",
+    )
+    assert raw.parse().choices[0].message.parsed.plan.amount == 2
+    assert raw.headers["x-gateway-structured-output-mode"] == "validated_json"
+    post = json.loads(claude_backend.requests[-1].content)
+    assert "format" not in post["output_config"]
+    assert post["output_config"]["effort"] == "high"
+    assert post["messages"][-1]["content"][0]["text"] == REQUEST["messages"][-1]["content"]
+    instruction = post["messages"][-1]["content"][-1]["text"]
+    schema = json.loads(instruction.split("\n", 1)[1])
+    assert list(schema["properties"]) == ["plan", "items", "state", "optional"]
+    assert schema["$defs"]["Part"]["properties"]["amount"]["minimum"] == 1
+    assert schema["properties"]["state"]["const"] == "ok"
+    assert set(schema["required"]) == set(schema["properties"])
+    assert post["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert not backend.requests
+    events = store.recent()
+    assert all(e["structured_output_mode"] == "validated_json" for e in events)
+    assert events[-1]["event"] == "completed"
+    assert instruction not in json.dumps(events) and "minimum" not in json.dumps(events)
+    cap = claude_client.get("/gateway/capabilities").json()["providers"]["anthropic"]
+    assert cap["structured_output_mode"] == "validated_json"
+    invalid = json.loads(claude_backend.text)
+    invalid["state"] = "wrong"
+    claude_backend.text = json.dumps(invalid)
+    with pytest.raises(Exception, match="schema_validation_failed"):
+        sdk.chat.completions.parse(
+            model=MODEL, messages=REQUEST["messages"], response_format=Answer
+        )
+    assert store.recent()[-1]["event"] == "failed"
+
+
+@pytest.mark.parametrize("claude_client", ["validated_json"], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        "{}",
+        '{"amount":0}',
+        '{"amount":"2"}',
+        '{"amount":2,"extra":true}',
+        '{"amount":NaN}',
+        '{"amount":Infinity}',
+    ],
+)
+def test_validated_json_rejects_invalid_completed_answers_without_retry(
+    claude_client, claude_backend, store, backend, stream, text
+):
+    claude_backend.text = text
+    response = claude_client.post(
+        "/api/v1/chat/completions",
+        json={
+            **REQUEST,
+            "stream": stream,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "Answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"amount": {"type": "number", "minimum": 1}},
+                        "required": ["amount"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        },
+    )
+    if stream:
+        assert response.status_code == 200
+        assert "schema_validation_failed" in response.text
+        assert '"finish_reason": "stop"' not in response.text
+    else:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "schema_validation_failed"
+    assert store.recent()[-1]["event"] == "failed"
+    assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
+    assert not backend.requests
+
+
+def test_validated_json_preserves_explicit_cache_boundaries_and_caller_objects(settings):
+    body = deepcopy(REQUEST)
+    body["messages"][-1]["content"] = [
+        {"type": "text", "text": "Prefix", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+    ]
+    body["response_format"] = {
+        "type": "json_schema",
+        "json_schema": {"name": "Answer", "schema": {"type": "integer", "minimum": 1}},
+    }
+    before = deepcopy(body)
+    prepared = claude_request(body, replace(settings, anthropic_structured_output="validated_json"))
+    assert body == before
+    assert prepared.body["messages"][-1]["content"][0] == body["messages"][-1]["content"][0]
+    assert "cache_control" not in prepared.body["messages"][-1]["content"][-1]
+    assert "cache_control" not in prepared.body["system"][0]
+    assert prepared.schema == body["response_format"]["json_schema"] | {"type": "json_schema"}
+
+
+def test_schema_compilation_error_is_safe_actionable_and_keeps_request_id(
+    claude_client, claude_backend, store
+):
+    claude_backend.status = 400
+    claude_backend.error_type = "invalid_request_error"
+    claude_backend.error_message = "The compiled grammar is too large. private-schema-text"
+    response = claude_client.post("/api/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "schema_compilation_limit"
+    assert "validated_json" in response.json()["error"]["message"]
+    assert "private-schema-text" not in response.text
+    assert response.headers["x-upstream-request-id"] == "claude-id"
+    assert store.recent()[-1]["upstream_request_id"] == "claude-id"
+    assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
+
+
+def test_structured_output_mode_is_explicit_and_validated(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHATGPT_GATEWAY_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT", raising=False)
+    assert Settings.from_env().anthropic_structured_output == "native"
+    monkeypatch.setenv("CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT", "validated_json")
+    assert Settings.from_env().anthropic_structured_output == "validated_json"
+    monkeypatch.setenv("CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT", "automatic")
+    with pytest.raises(ValueError, match="native or validated_json"):
+        Settings.from_env()
 
 
 def test_stream_usage_and_refusal_remain_distinct(claude_client, claude_backend, store):

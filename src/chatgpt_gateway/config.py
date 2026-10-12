@@ -23,6 +23,7 @@ class Settings:
     accept_anthropic_data_controls: bool = False
     anthropic_max_tokens: int = 32768
     anthropic_system_cache_ttl: str = "5m"
+    anthropic_structured_output: str = "native"
 
     @property
     def base_url(self) -> str:
@@ -72,6 +73,9 @@ class Settings:
             anthropic_system_cache_ttl=os.environ.get(
                 "CHATGPT_GATEWAY_ANTHROPIC_SYSTEM_CACHE_TTL", "5m"
             ),
+            anthropic_structured_output=os.environ.get(
+                "CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT", "native"
+            ),
         )
         if not 1 <= settings.port <= 65535:
             raise ValueError("CHATGPT_GATEWAY_PORT must be between 1 and 65535")
@@ -83,4 +87,8 @@ class Settings:
             raise ValueError("CHATGPT_GATEWAY_ANTHROPIC_MAX_TOKENS must be between 1 and 128000")
         if settings.anthropic_system_cache_ttl not in {"off", "5m", "1h"}:
             raise ValueError("CHATGPT_GATEWAY_ANTHROPIC_SYSTEM_CACHE_TTL must be off, 5m or 1h")
+        if settings.anthropic_structured_output not in {"native", "validated_json"}:
+            raise ValueError(
+                "CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT must be native or validated_json"
+            )
         return settings

@@ -36,6 +36,22 @@ def api_error(error: anthropic.APIError) -> GatewayError:
     # Never return it as a successful nonstreaming inference.
     if not isinstance(status, int) or not 400 <= status <= 599:
         status = ERROR_STATUS.get(code, 502)
+    if (
+        status == 400
+        and code == "invalid_request_error"
+        and str(detail.get("message", "")).startswith(
+            ("The compiled grammar is too large", "Schema is too complex for compilation")
+        )
+    ):
+        # Classify a known error without forwarding a message that may echo private input.
+        return GatewayError(
+            400,
+            "Anthropic cannot compile this output schema. Select the gateway's explicit "
+            "validated_json mode or simplify the schema.",
+            "schema_compilation_limit",
+            "response_format.json_schema.schema",
+            request_id=getattr(error, "request_id", None),
+        )
     return GatewayError(
         status,
         "Anthropic rejected or interrupted the request.",
@@ -153,6 +169,7 @@ class ClaudeClient:
                         "stream": prepared.stream,
                         "cache_policy": cache_policy(prepared.body),
                         "data_policy_override": prepared.data_policy_override,
+                        "structured_output_mode": prepared.structured_output_mode,
                     }
                 )
                 began = True
@@ -293,6 +310,7 @@ class ClaudeClient:
             raise GatewayError(status, "Claude exceeded the gateway timeout.", code) from error
         except anthropic.APIError as error:
             failure = api_error(error)
+            upstream_id = failure.request_id or upstream_id
             outcome, status, code = "failed", failure.status, failure.code
             raise failure from error
         except (ValueError, RuntimeError) as error:
@@ -320,5 +338,6 @@ class ClaudeClient:
                         "upstream_request_id": upstream_id,
                         "usage": claude_usage(usage),
                         "data_policy_override": prepared.data_policy_override,
+                        "structured_output_mode": prepared.structured_output_mode,
                     }
                 )

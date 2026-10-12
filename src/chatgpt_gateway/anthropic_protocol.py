@@ -1,5 +1,6 @@
 """The portable OpenRouter Chat subset served by the Anthropic API."""
 
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -171,13 +172,34 @@ def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
     if automatic:
         upstream["cache_control"] = automatic
     output_config = {}
+    structured_mode = None
     if output_format and output_format["type"] == "json_schema":
+        structured_mode = settings.anthropic_structured_output
         # Use the vendor's supported schema transformation. Always validate against the
         # untouched original at completion, including constraints the API cannot enforce.
-        output_config["format"] = {
-            "type": "json_schema",
-            "schema": transform_schema(deepcopy(output_format["schema"])),
-        }
+        if structured_mode == "native":
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": transform_schema(deepcopy(output_format["schema"])),
+            }
+        else:
+            # Explicit operator mode for schemas too large for Anthropic's grammar.
+            # Append a separate block: preserve every caller block and cache boundary.
+            # Keep insertion order, because applications may plan before writing.
+            messages[-1]["content"].append(
+                {
+                    "type": "text",
+                    "text": (
+                        "Return only one JSON value that conforms to the following JSON Schema. "
+                        "Do not include markdown fences, a preamble or trailing commentary. "
+                        "Follow the order of properties in each schema object when writing "
+                        "the JSON. Include every required property and respect all constraints.\n"
+                        + json.dumps(
+                            output_format["schema"], ensure_ascii=False, separators=(",", ":")
+                        )
+                    ),
+                }
+            )
     if effort:
         output_config["effort"] = effort
         upstream["thinking"] = {"type": "adaptive"}
@@ -190,6 +212,7 @@ def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
         output_format,
         data_policy_override=overridden,
         provider="anthropic",
+        structured_output_mode=structured_mode,
     )
 
 

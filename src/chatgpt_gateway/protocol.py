@@ -200,6 +200,7 @@ class Prepared:
     schema: dict | None = None
     data_policy_override: bool = False
     provider: str = "chatgpt_plan"
+    structured_output_mode: str | None = None
 
 
 def chat_request(body: dict[str, Any], *, accept_chatgpt_data_controls: bool = False) -> Prepared:
@@ -403,6 +404,10 @@ def assistant_message(response: dict) -> dict:
     return message
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("Non-JSON numeric constant")
+
+
 def validate_output(response: dict, schema: dict | None) -> None:
     if not schema or schema["type"] == "text":
         return
@@ -410,7 +415,7 @@ def validate_output(response: dict, schema: dict | None) -> None:
     if message.get("refusal"):
         return
     try:
-        value = json.loads(message.get("content") or "")
+        value = json.loads(message.get("content") or "", parse_constant=_reject_json_constant)
         if schema["type"] == "json_schema":
             Draft202012Validator(schema["schema"]).validate(value)
     except (ValueError, ValidationError) as error:
