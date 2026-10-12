@@ -168,6 +168,7 @@ def create_app(
         return {
             "provider": "chatgpt_plan",
             "chat_completions": True,
+            "max_concurrency": settings.max_concurrency,
             "responses": True,
             "structured_output": "subject_to_model_access",
             "image_input": "subject_to_model_access",

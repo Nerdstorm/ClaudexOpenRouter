@@ -83,12 +83,14 @@ All commands use the same environment settings. Put `--port` before the command 
 | --- | --- |
 | `CHATGPT_GATEWAY_DATA_DIR` | `~/.local/share/chatgpt-plan-gateway` |
 | `CHATGPT_GATEWAY_PORT` | `8317` |
-| `CHATGPT_GATEWAY_MAX_CONCURRENCY` | `2` |
+| `CHATGPT_GATEWAY_MAX_CONCURRENCY` | `12` |
 | `CHATGPT_GATEWAY_TIMEOUT_SECONDS` | `600` |
 | `CHATGPT_GATEWAY_MAX_REQUEST_BYTES` | `8388608` (8 MiB) |
 | `CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS` | `0` (strict data-policy handling) |
 
 The server binds to `127.0.0.1`. Management and inference require the local key. Foreign browser origins are refused; this version supports local server/CLI clients rather than direct cross-origin browser applications. One server may use a data directory at a time, preventing refresh-token races.
+
+Concurrency limits model calls across all clients of this gateway process. The authenticated capability endpoint reports the configured `max_concurrency`. Callers should queue excess requests: an occupied gateway returns `429 gateway_busy` after one second. Application batch/job limits are separate and must also allow concurrent runs. OpenAI account limits still apply; this local setting does not increase account allowance.
 
 ## Benchmarking
 

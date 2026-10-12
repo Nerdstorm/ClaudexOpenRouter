@@ -15,7 +15,7 @@ APP_NAME = "ChatGPT Plan Gateway"
 class Settings:
     data_dir: Path
     port: int = 8317
-    max_concurrency: int = 2
+    max_concurrency: int = 12
     timeout_seconds: float = 600
     max_request_bytes: int = 8 * 1024 * 1024
     accept_chatgpt_data_controls: bool = False
@@ -40,7 +40,7 @@ class Settings:
             .expanduser()
             .resolve(),
             port=int(os.environ.get("CHATGPT_GATEWAY_PORT", "8317")),
-            max_concurrency=int(os.environ.get("CHATGPT_GATEWAY_MAX_CONCURRENCY", "2")),
+            max_concurrency=int(os.environ.get("CHATGPT_GATEWAY_MAX_CONCURRENCY", "12")),
             timeout_seconds=float(os.environ.get("CHATGPT_GATEWAY_TIMEOUT_SECONDS", "600")),
             max_request_bytes=int(os.environ.get("CHATGPT_GATEWAY_MAX_REQUEST_BYTES", "8388608")),
             accept_chatgpt_data_controls=data_controls == "1",
