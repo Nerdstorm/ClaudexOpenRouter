@@ -252,7 +252,7 @@ class Auth:
             self._retry_client_id = None
         return public_account(saved)
 
-    async def credentials(self) -> dict[str, Any]:
+    async def credentials(self, *, rejected: dict[str, Any] | None = None) -> dict[str, Any]:
         # The server holds an exclusive process lock; this lock serializes all token rotation.
         async with self._refresh_lock:
             account = self.store.active()
@@ -260,20 +260,29 @@ class Auth:
                 raise GatewayError(
                     401, "Connect a ChatGPT account using chatgpt-gateway login.", "not_signed_in"
                 )
+            if rejected is not None and account["id"] != rejected["id"]:
+                raise GatewayError(
+                    409, "The selected account changed; retry explicitly.", "account_changed"
+                )
             if "chatgpt.tokens.use.direct" not in account.get("scopes", []):
                 raise GatewayError(
                     403,
                     "This account has not allowed ChatGPT plan usage. Sign in again to enable it.",
                     "plan_permission_missing",
                 )
-            if account.get("expires_at", 0) > time.time() + 60:
+            # A rejection may race another request's renewal. Reuse that replacement;
+            # never rotate it again or move this request to another account.
+            if rejected is not None and account["access_token"] != rejected["access_token"]:
+                return account
+            earliest = account.get("earliest_refresh_at") or 0
+            too_early = isinstance(earliest, (int, float)) and earliest > time.time()
+            if account.get("expires_at", 0) > time.time() + 60 and (rejected is None or too_early):
                 return account
             if not account.get("refresh_token"):
                 raise GatewayError(
                     401, "The sign-in expired. Connect this account again.", "sign_in_expired"
                 )
-            earliest = account.get("earliest_refresh_at") or 0
-            if isinstance(earliest, (int, float)) and earliest > time.time():
+            if too_early:
                 raise GatewayError(
                     503,
                     "Token renewal is not yet available. Try again shortly.",

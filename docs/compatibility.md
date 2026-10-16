@@ -135,6 +135,8 @@ Local JSON/schema validation is performed at completion, so streamed JSON fragme
 
 Chat output sets `provider:"chatgpt_plan"`, without fabricating OpenRouter prices or BYOK claims. Completed native `web_search_call` items supply `usage.server_tool_use_details.web_search_requests`; this counts completed tool invocations, not the search backend's individual HTTP requests. Providing a search tool without evidence of its execution never invents a call. Native URL citations are translated into Chat's `url_citation` object shape. Usage chunks include the same tool evidence.
 
+OpenAI inference can reuse a same-account catalogue up to five minutes old during a temporary model-list outage. Explicit `GET /models` remains fresh. A model-list token-expired rejection can renew eligible credentials and retry that GET once; this never retries inference or substitutes models. Preflight failures are recorded separately as `preflight_failed`.
+
 The model catalog contains `access_verified:false`: access is confirmed only by a completed real inference for the selected model/account. The journal is a diagnostic record, not a billing ledger. Missing usage is `null`, never fabricated as zero, and no cash price is estimated. Account credits remain controlled by ChatGPT usage settings, even though there is no API-key billing fallback.
 
 See [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) and [errors and recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery) for the official admission and terminal-error contracts.

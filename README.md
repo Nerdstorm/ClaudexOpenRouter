@@ -76,7 +76,7 @@ A Python client can also use `OpenAI(base_url=..., api_key=..., max_retries=0)` 
 
 Use [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage) to manage this app's allowance and whether it may use credits after reaching plan limits. If you want subscription allowance only, disable credits for this app there. The OpenAI route has no API-key billing fallback, and neither route has a provider fallback. The gateway cannot override the account's credit permission. A model's token counts do not establish a cash price.
 
-Plan usage can share limits with other applications, and account/workspace restrictions still apply. Quota failures are returned as failures. There is no automatic retry, model substitution, or switch to another billing route. See [OpenAI's accounts and usage documentation](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions).
+Plan usage can share limits with other applications, and account/workspace restrictions still apply. Quota failures are returned as failures. There is no automatic inference retry, model substitution, or switch to another billing route. A failed model-list read may renew an eligible token and retry that read once; inference can use a previously verified catalogue for up to five minutes during a temporary listing outage. See [OpenAI's accounts and usage documentation](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions).
 
 ## Commands and settings
 

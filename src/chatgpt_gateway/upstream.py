@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -12,6 +13,11 @@ from .config import RESOURCE, Settings
 from .errors import GatewayError
 from .protocol import Prepared, assistant_message, validate_output
 from .storage import Store
+
+logger = logging.getLogger(__name__)
+CATALOG_TTL = 60
+CATALOG_STALE_LIMIT = 300
+CATALOG_RETRY_DELAY = 15
 
 PLAN_ERROR_STATUS = {
     "subscription_sharing_user_not_eligible": 403,
@@ -85,14 +91,69 @@ class PlanClient:
         self.settings, self.store, self.auth, self.client = settings, store, auth, client
         self._slots = slots if slots is not None else asyncio.Semaphore(settings.max_concurrency)
         self._catalog: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._catalog_lock = asyncio.Lock()
+        self._catalog_retry_at: dict[str, float] = {}
 
     async def catalog(self, account: dict, *, fresh: bool = False) -> list[dict]:
+        # One refresh at a time, so parallel inference does not hammer a failing listing.
+        async with self._catalog_lock:
+            return await self._catalog_for(account, fresh=fresh)
+
+    async def _catalog_for(self, account: dict, *, fresh: bool) -> list[dict]:
         cached = self._catalog.get(account["id"])
-        if cached and not fresh and time.time() - cached[0] < 60:
+        age = time.monotonic() - cached[0] if cached else float("inf")
+        if (
+            cached
+            and not fresh
+            and (
+                age < CATALOG_TTL
+                or (
+                    age < CATALOG_STALE_LIMIT
+                    and time.monotonic() < self._catalog_retry_at.get(account["id"], 0)
+                )
+            )
+        ):
             return cached[1]
+        try:
+            models = await self._fetch_catalog(account)
+        except (GatewayError, httpx.TransportError) as error:
+            recoverable = isinstance(error, httpx.TransportError) or (
+                isinstance(error, GatewayError)
+                and (
+                    error.status in {408, 429, 500, 502, 503, 504}
+                    or (error.status == 401 and error.code == "token_expired")
+                )
+            )
+            age = time.monotonic() - cached[0] if cached else float("inf")
+            if not recoverable:
+                self._catalog.pop(account["id"], None)
+                self._catalog_retry_at.pop(account["id"], None)
+            if fresh or not cached or age >= CATALOG_STALE_LIMIT or not recoverable:
+                raise
+            self._catalog_retry_at[account["id"]] = time.monotonic() + CATALOG_RETRY_DELAY
+            logger.warning(
+                "Using recent model catalogue after upstream listing failure",
+                extra={"code": getattr(error, "code", "transport_error"), "age_seconds": int(age)},
+            )
+            # Listing is metadata, not authorization: inference still goes upstream with
+            # this account's credentials and its real failures remain failures.
+            return cached[1]
+        self._catalog[account["id"]] = (time.monotonic(), models)
+        self._catalog_retry_at.pop(account["id"], None)
+        return models
+
+    async def _fetch_catalog(self, account: dict) -> list[dict]:
         response = await self.client.get(
             f"{RESOURCE}/models", headers={"Authorization": f"Bearer {account['access_token']}"}
         )
+        if response.status_code == 401 and upstream_error(response).code == "token_expired":
+            renewed = await self.auth.credentials(rejected=account)
+            if renewed["access_token"] != account["access_token"]:
+                account.update(renewed)
+                response = await self.client.get(
+                    f"{RESOURCE}/models",
+                    headers={"Authorization": f"Bearer {account['access_token']}"},
+                )
         if response.status_code != 200:
             raise upstream_error(response)
         payload = response.json()
@@ -122,7 +183,6 @@ class PlanClient:
                     "access_verified": False,
                 }
             )
-        self._catalog[account["id"]] = (time.time(), models)
         return models
 
     async def events(
@@ -297,11 +357,11 @@ class PlanClient:
             raise
         finally:
             self._slots.release()
-            if began:
+            if began or outcome == "failed":
                 self.store.journal(
                     {
                         "request_id": request_id,
-                        "event": outcome,
+                        "event": outcome if began else "preflight_failed",
                         "status": status,
                         "code": code,
                         "model": actual_model,

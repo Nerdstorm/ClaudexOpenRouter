@@ -44,13 +44,13 @@ Only a verified identity becomes an account record. Identity alone does not enab
 
 If a first code exchange reports `invalid_grant`, the issued ID is retained separately in memory for a fresh ordinary `login` attempt. It never becomes an inference credential or replaces the active account. This unverified retry registration disappears on restart; verified registrations persist. `login --new` explicitly starts another registration.
 
-The service renews tokens near expiry under a single async lock. A successful refresh replaces access token, rotating refresh token, scopes and expiry together. A process lock prevents two servers from racing the same saved token. Terminal refresh failures clear unusable tokens while preserving the issued registration; temporary failures preserve the token set. Sign-out attempts remote revocation, then clears locally and reports whether revocation was confirmed.
+The service renews tokens near expiry under a single async lock. A model-list `401 token_expired` also requests renewal when the issuer’s `earliest_refresh_at` permits it, then repeats only that metadata read once. Concurrent rejections reuse an already rotated token and never change accounts. A successful refresh replaces access token, rotating refresh token, scopes and expiry together. A process lock prevents two servers from racing the same saved token. Terminal refresh failures clear unusable tokens while preserving the issued registration; temporary failures preserve the token set. Sign-out attempts remote revocation, then clears locally and reports whether revocation was confirmed.
 
 Official contracts: [sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions), and [token reference](https://developers.openai.com/siwc/token-sharing-open-source/token-reference).
 
 ## Inference lifecycle
 
-After local validation, the server acquires a concurrency slot, obtains renewable credentials, and checks the exact model against the selected account's catalog. Catalogs used for inference are cached for 60 seconds per registration; external model-list requests refresh them. A listing is not an access guarantee.
+After local validation, the server acquires a concurrency slot, obtains renewable credentials, and checks the exact model against the selected account's catalog. Catalogues used for inference are cached for 60 seconds per registration. On a temporary listing failure (transport, 408/429/selected 5xx or `401 token_expired`), an existing same-registration list may be used for at most five minutes from its successful fetch, with subsequent listing attempts spaced 15 seconds apart. A failure never extends that age. Explicit external model-list requests remain fresh and report errors. Definite grant/authorization errors discard the cache. A listing is not an access guarantee: the exact requested model must be on that list and inference still authenticates upstream; no inference is replayed.
 
 Every OpenAI upstream inference uses `POST https://api.openai.com/v1/responses`, `store:false`, and `stream:true`. The client sends all required history. Nonstreaming clients receive an object only after `response.completed`; streaming clients receive events/chunks, and a finish marker is emitted only after validated completion. JSON-format requests are checked locally at completion. Refusals retain their own representation.
 
@@ -60,7 +60,7 @@ The route has also returned an empty terminal `output` list after supplying the 
 
 HTTP errors preserve upstream status, body shape, code, parameter, retry hint and request ID where supplied. Known plan errors inside SSE use the statuses documented by OpenAI. Interrupted, incomplete, malformed or mismatched-model results fail. There is no automatic inference retry or model fallback.
 
-Admitted attempts have a `started` event and a terminal `completed`, `failed` or `interrupted` event with actual model, elapsed time, request ID and usage when available. Credential/model preflight failures are returned to the caller before a journal attempt begins. Validation failures are not recorded as model executions. Response usage remains unknown when the upstream omits it.
+Admitted attempts have a `started` event and a terminal `completed`, `failed` or `interrupted` event with actual model, elapsed time, request ID and usage when available. Credential/model preflight failures are returned to the caller and recorded as `preflight_failed`, without a `started` event or a claim that inference ran. Validation failures are not recorded as model executions. Response usage remains unknown when the upstream omits it.
 
 ## Claude routing, caching and billing
 
