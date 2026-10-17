@@ -20,7 +20,7 @@ MODEL = "anthropic/claude-sonnet-5.5"
 REQUEST = {
     "model": MODEL,
     "messages": [
-        {"role": "system", "content": "Stable instructions, not recipe-specific."},
+        {"role": "system", "content": "Stable instructions shared across requests."},
         {"role": "user", "content": "A new question."},
     ],
 }

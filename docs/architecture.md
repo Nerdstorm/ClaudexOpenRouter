@@ -19,7 +19,7 @@ flowchart LR
     B[System browser] -->|State-protected callback| A
 ```
 
-The gateway owns HTTP compatibility, account permissions and transport. Client applications own prompts, schemas, role assignments, evaluation labels, retries and tool execution. No module imports Recipe Designer or any other application. There is no background agent harness and no access to desktop conversations.
+The gateway owns HTTP compatibility, account permissions and transport. Client applications own prompts, schemas, role assignments, evaluation labels, retries and tool execution. No module imports a client application. There is no background agent harness and no access to desktop conversations.
 
 ## Responsibilities
 
@@ -74,7 +74,7 @@ Explicit OpenRouter caching markers and TTLs are preserved. The optional default
 
 API keys charge the linked Console organization. Eligible included credits may cover those calls, but the gateway cannot verify balances or stop precisely at the boundary between promotional and purchased credits. Console workspace limits and billing settings control that. This is not a fallback from OpenAI: the caller explicitly selected a Claude model and its Anthropic API route. Provider-specific OpenRouter data-policy exceptions are independent and off by default. Switching a client to OpenRouter changes URL/key, provider billing and potentially cache warmth, while preserving supported client-side request shapes.
 
-Contracts: [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), and [OpenRouter cache controls](https://openrouter.ai/docs/guides/best-practices/prompt-caching). Architecture decision: Workstate `chatgpt-plan-gateway-0008`.
+Contracts: [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), and [OpenRouter cache controls](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
 
 ## Local files and lifecycle
 
@@ -90,6 +90,6 @@ The default data directory is `~/.local/share/chatgpt-plan-gateway` with mode `0
 
 These files are local runtime data, not a database or source-controlled configuration. They are not encrypted at rest; protection is the operating-system user boundary and file permissions. No code reads desktop authentication or browser cookies. Logs exclude request/answer content and credentials; HTTP access logs remain off to protect OAuth codes.
 
-The standalone Git checkout lives at `~/src/chatgpt-plan-gateway`, alongside other projects rather than inside the Smartmeals workspace. Its virtual environment belongs to that checkout; after relocating it, recreate the environment with `uv venv --clear --python 3.12 .venv` and `uv sync --frozen`. Runtime accounts and keys remain in the separate data directory.
+The checkout can live in any directory. Its virtual environment belongs to that checkout; after relocating it, recreate the environment with `uv venv --clear --python 3.12 .venv` and `uv sync --frozen`. Runtime accounts and keys remain in the separate data directory.
 
 The service currently runs in the foreground. Start it from the checkout with `uv run chatgpt-gateway serve`; no launch agent or automatic startup is installed.
