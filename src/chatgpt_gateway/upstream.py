@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -185,6 +186,34 @@ class PlanClient:
             )
         return models
 
+    @asynccontextmanager
+    async def _response(self, prepared: Prepared, account: dict) -> AsyncIterator[httpx.Response]:
+        """Replay only an explicitly expired-token rejection, before any stream is read."""
+        for attempt in range(2):
+            async with self.client.stream(
+                "POST",
+                f"{RESOURCE}/responses",
+                json=prepared.body,
+                headers={
+                    "Authorization": f"Bearer {account['access_token']}",
+                    "Accept": "text/event-stream",
+                },
+            ) as response:
+                if response.status_code != 401 or attempt == 1:
+                    yield response
+                    return
+                await response.aread()
+                error = upstream_error(response)
+                if error.code != "token_expired":
+                    yield response
+                    return
+            # Close the rejected response before renewing. The auth lock coalesces
+            # concurrent rejections and preserves account identity and refresh timing.
+            renewed = await self.auth.credentials(rejected=account)
+            if renewed["access_token"] == account["access_token"]:
+                raise error
+            account.update(renewed)
+
     async def events(
         self,
         prepared: Prepared,
@@ -243,15 +272,7 @@ class PlanClient:
                     }
                 )
                 began = True
-                async with self.client.stream(
-                    "POST",
-                    f"{RESOURCE}/responses",
-                    json=prepared.body,
-                    headers={
-                        "Authorization": f"Bearer {account['access_token']}",
-                        "Accept": "text/event-stream",
-                    },
-                ) as response:
+                async with self._response(prepared, account) as response:
                     upstream_id = response.headers.get("x-request-id") or response.headers.get(
                         "openai-request-id"
                     )
