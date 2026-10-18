@@ -2,6 +2,7 @@ import asyncio
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from chatgpt_gateway.anthropic_protocol import CLAUDE_MODELS, claude_request, claude_usage
 from chatgpt_gateway.anthropic_upstream import ClaudeClient
 from chatgpt_gateway.app import create_app
-from chatgpt_gateway.config import Settings
+from chatgpt_gateway.config import Settings, anthropic_rates
 from chatgpt_gateway.errors import GatewayError
 
 MODEL = "anthropic/claude-sonnet-5.5"
@@ -521,6 +522,31 @@ def test_schema_compilation_error_is_safe_actionable_and_keeps_request_id(
     assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
 
 
+def test_exhausted_credit_balance_is_402_insufficient_credit(claude_client, claude_backend, store):
+    claude_backend.status = 400
+    claude_backend.error_type = "invalid_request_error"
+    claude_backend.error_message = (
+        "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing."
+    )
+    response = claude_client.post("/api/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 402
+    assert response.json()["error"]["code"] == "insufficient_credit"
+    assert "Claude Console" in response.json()["error"]["message"]
+    assert response.headers["x-upstream-request-id"] == "claude-id"
+    assert store.recent()[-1]["code"] == "insufficient_credit"
+    assert store.recent()[-1]["status"] == 402
+    assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
+
+
+def test_other_invalid_requests_keep_their_status(claude_client, claude_backend):
+    claude_backend.status = 400
+    claude_backend.error_type = "invalid_request_error"
+    claude_backend.error_message = "messages: text content blocks must be non-empty"
+    response = claude_client.post("/api/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"
+
+
 def test_structured_output_mode_is_explicit_and_validated(tmp_path, monkeypatch):
     monkeypatch.setenv("CHATGPT_GATEWAY_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT", raising=False)
@@ -608,6 +634,73 @@ def test_missing_usage_is_not_fabricated():
     value = claude_usage({"input_tokens": 10, "output_tokens": 3})
     assert value["input_tokens"] is None and value["total_tokens"] is None
     assert value["input_tokens_details"]["cached_tokens"] is None
+
+
+RATES = anthropic_rates(
+    json.loads((Path(__file__).parents[1] / "examples" / "anthropic-rates.json").read_text())
+)
+
+
+def test_usage_is_priced_only_with_configured_rates():
+    native = {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 2000,
+        "cache_creation_input_tokens": 1000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 600, "ephemeral_1h_input_tokens": 400},
+    }
+    assert "cost" not in claude_usage(native)
+    priced = claude_usage(native, RATES, "claude-sonnet-5-5")
+    # 10 x $2 + 600 x $2.50 + 400 x $4 + 2000 x $0.10 + 3 x $10, per million tokens.
+    assert priced["cost"] == pytest.approx(3350 / 1_000_000)
+    assert priced["cost_details"] == {"source": "anthropic_rates", "rates_as_of": "2026-10-19"}
+    # Without a lifetime breakdown, writes are priced at Anthropic's default five minutes.
+    unsplit = {k: v for k, v in native.items() if k != "cache_creation"}
+    assert claude_usage(unsplit, RATES, "claude-opus-5-5")["cost"] == pytest.approx(
+        (10 * 4 + 1000 * 5 + 2000 * 0.2 + 3 * 20) / 1_000_000
+    )
+    assert "cost" not in claude_usage(native, RATES, "claude-unlisted")
+    assert "cost" not in claude_usage(
+        {"input_tokens": 10, "output_tokens": 3}, RATES, "claude-opus-5-5"
+    )
+
+
+def test_chat_usage_carries_the_configured_cost(settings, store, backend, claude_backend):
+    configured = replace(settings, anthropic_api_key="test-anthropic-secret", anthropic_rates=RATES)
+
+    def handle(request):
+        if request.url.host == "api.anthropic.com":
+            return claude_backend.handler(request)
+        return backend.handler(request)
+
+    app = create_app(configured, transport=httpx.MockTransport(handle))
+    with TestClient(app, base_url=settings.base_url) as client:
+        client.headers["authorization"] = f"Bearer {store.api_key}"
+        response = client.post("/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    # The default stream: 10 fresh, 2000 read, 1000 written for five minutes, 3 output (Sonnet).
+    assert usage["cost"] == pytest.approx((10 * 2 + 1000 * 2.5 + 2000 * 0.1 + 3 * 10) / 1e6)
+    assert usage["cost_details"]["source"] == "anthropic_rates"
+    assert store.recent()[-1]["usage"]["cost"] == usage["cost"]
+
+
+def test_rates_file_is_optional_and_validated(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHATGPT_GATEWAY_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE", raising=False)
+    assert Settings.from_env().anthropic_rates is None
+    good = tmp_path / "rates.json"
+    good.write_text(json.dumps(RATES))
+    monkeypatch.setenv("CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE", str(good))
+    assert Settings.from_env().anthropic_rates == RATES
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"as_of": "2026-10-19", "models": {"claude-opus-5-5": {"input": 4}}}))
+    monkeypatch.setenv("CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE", str(bad))
+    with pytest.raises(ValueError, match="need nonnegative"):
+        Settings.from_env()
+    monkeypatch.setenv("CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE", str(tmp_path / "missing.json"))
+    with pytest.raises(ValueError, match="could not be read"):
+        Settings.from_env()
 
 
 def test_secure_key_file_and_settings_validation(tmp_path, monkeypatch):
