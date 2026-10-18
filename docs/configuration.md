@@ -36,6 +36,7 @@ All commands use the same environment settings. Put `--port` before the command 
 | `CHATGPT_GATEWAY_ANTHROPIC_API_KEY_FILE` | `<data directory>/anthropic-api-key` (owner-only, optional) |
 | `CHATGPT_GATEWAY_ANTHROPIC_MAX_TOKENS` | `32768`; used only when a Claude request omits its ceiling |
 | `CHATGPT_GATEWAY_ANTHROPIC_SYSTEM_CACHE_TTL` | `5m`; `off` and `1h` also supported |
+| `CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE` | unset; a JSON rates file (see `examples/anthropic-rates.json`) that prices each Claude call |
 | `CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT` | `native`; explicit `validated_json` mode supports larger schemas with full local validation |
 | `CHATGPT_GATEWAY_ACCEPT_ANTHROPIC_DATA_CONTROLS` | `0`; separate explicit policy exception, never inherited from ChatGPT |
 
@@ -61,7 +62,7 @@ Caller-supplied OpenRouter `cache_control` markers are preserved, including five
 
 For portable caching when switching back to OpenRouter, put explicit markers in the request. See [the cache example and contract](compatibility.md#claude-chat-and-prompt-caching). Prefixes must be identical and large enough for the chosen model. A cold parallel group is not guaranteed to share a cache: the first real response must begin before later calls can reuse its entry. Writes have a premium; record read/write tokens and latency and compare warm and cold calls. The gateway does not make extra warm-up calls or serialize benchmark runs.
 
-Anthropic usage is translated into OpenRouter's `cached_tokens` and `cache_write_tokens`, with uncached tokens and lifetime breakdown retained. Total prompt tokens include **uncached + cache-read + cache-write** tokens; they are not counted twice. Missing usage remains unknown. Each journal event labels the provider and Anthropic API billing source, and records duration and time to first text without recording text itself.
+Anthropic usage is translated into OpenRouter's `cached_tokens` and `cache_write_tokens`, with uncached tokens and lifetime breakdown retained. With `CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE` set, each Claude call's usage also carries OpenRouter's `cost` field: the file's rates (USD per million tokens, per native model, with separate five-minute and one-hour cache-write rates) applied to Anthropic's exact counts, labelled `cost_details.source:"anthropic_rates"` with the file's `as_of` date. Without the file, or for a model it does not list, no cost is reported. Keep the file current with Anthropic's pricing page; the example holds the published rates on its date. Total prompt tokens include **uncached + cache-read + cache-write** tokens; they are not counted twice. Missing usage remains unknown. Each journal event labels the provider and Anthropic API billing source, and records duration and time to first text without recording text itself.
 
 ## OpenRouter data-policy options
 

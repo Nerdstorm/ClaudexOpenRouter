@@ -316,7 +316,7 @@ class ClaudeClient:
                         "status": "completed",
                         "gateway_provider": "anthropic",
                         "output": [{"type": "message", "role": "assistant", "content": [content]}],
-                        "usage": claude_usage(usage),
+                        "usage": claude_usage(usage, self.settings.anthropic_rates, native),
                     }
                     try:
                         validate_output(result, prepared.schema)
@@ -369,7 +369,7 @@ class ClaudeClient:
                         "duration_ms": round((time.monotonic() - started) * 1000),
                         "first_token_ms": first_token,
                         "upstream_request_id": upstream_id,
-                        "usage": claude_usage(usage),
+                        "usage": claude_usage(usage, self.settings.anthropic_rates, native),
                         "data_policy_override": prepared.data_policy_override,
                         "structured_output_mode": prepared.structured_output_mode,
                         "structured_output_version": prepared.structured_output_version,
