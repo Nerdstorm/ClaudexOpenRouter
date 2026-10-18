@@ -79,6 +79,11 @@ schema transformation and native grammar, then validates against the client's or
 Known grammar-size rejections return `400 schema_compilation_limit`, with a safe explanation
 and upstream request ID; native error text is not copied into the response or journal.
 
+When Anthropic refuses a call because the API organization's credit balance is too low, the
+gateway returns `402 insufficient_credit` with the upstream request ID instead of a generic
+`400`, so a client can stop sending work until credit is added in Claude Console. The gateway
+reports the refusal only; it never reads or claims to verify the balance.
+
 An operator may select `validated_json` when the native compiler cannot support the contract.
 The Chat `response_format` and completed response shape stay the same. The gateway appends a
 separate system block after caller system context containing a JSON-only instruction and the

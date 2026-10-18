@@ -21,8 +21,13 @@ ERROR_STATUS = {
     "authentication_error": 401,
     "permission_error": 403,
     "invalid_request_error": 400,
+    "billing_error": 402,
     "api_error": 500,
 }
+# Anthropic refuses every request once the API organization's prepaid balance runs out, as an
+# ordinary invalid request. Callers need to tell that apart from a bad request: it is not
+# theirs to fix, and every further call fails the same way until credit is added.
+CREDIT_EXHAUSTED = "Your credit balance is too low"
 
 
 def api_error(error: anthropic.APIError) -> GatewayError:
@@ -50,6 +55,19 @@ def api_error(error: anthropic.APIError) -> GatewayError:
             "validated_json mode or simplify the schema.",
             "schema_compilation_limit",
             "response_format.json_schema.schema",
+            request_id=getattr(error, "request_id", None),
+        )
+    if code == "billing_error" or (
+        status == 400
+        and code == "invalid_request_error"
+        and str(detail.get("message", "")).startswith(CREDIT_EXHAUSTED)
+    ):
+        # Report the refusal as Anthropic gave it. The gateway cannot see the balance itself.
+        return GatewayError(
+            402,
+            "Anthropic refused the request: the API organization's credit balance is too low. "
+            "Add credit in Claude Console; every Claude call fails until then.",
+            "insufficient_credit",
             request_id=getattr(error, "request_id", None),
         )
     return GatewayError(

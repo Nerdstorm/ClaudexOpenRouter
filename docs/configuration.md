@@ -79,6 +79,7 @@ not certify OpenRouter's policy or change model selection or billing. Both defau
 | `sign_in_expired` or repeated `token_expired` | Run `chatgpt-gateway login` again. Eligible token renewal is automatic, with at most one retry of an explicitly rejected request. |
 | `429 gateway_busy` | Queue calls in your client; the gateway's default shared concurrency is 12. |
 | Upstream usage limit or insufficient credits | Check the selected provider's account limits and billing. The gateway never changes providers to get around them. |
+| Claude `402 insufficient_credit` | The Anthropic API organization is out of credit. Add credit in Claude Console; every Claude call fails until then. |
 | Unsupported model or field | Select an exact `models` ID and check the [compatibility contract](compatibility.md). This implements a subset of OpenRouter. |
 | Claude rejects a large JSON schema | Consider the explicit `validated_json` mode documented above. Completed invalid output still fails validation. |
 | Docker cannot connect | On Docker Desktop or OrbStack use `host.docker.internal`, not the container's `127.0.0.1`. Other Docker setups need explicit host networking configuration. |

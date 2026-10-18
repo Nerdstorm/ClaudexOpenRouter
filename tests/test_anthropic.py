@@ -521,6 +521,31 @@ def test_schema_compilation_error_is_safe_actionable_and_keeps_request_id(
     assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
 
 
+def test_exhausted_credit_balance_is_402_insufficient_credit(claude_client, claude_backend, store):
+    claude_backend.status = 400
+    claude_backend.error_type = "invalid_request_error"
+    claude_backend.error_message = (
+        "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing."
+    )
+    response = claude_client.post("/api/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 402
+    assert response.json()["error"]["code"] == "insufficient_credit"
+    assert "Claude Console" in response.json()["error"]["message"]
+    assert response.headers["x-upstream-request-id"] == "claude-id"
+    assert store.recent()[-1]["code"] == "insufficient_credit"
+    assert store.recent()[-1]["status"] == 402
+    assert len([r for r in claude_backend.requests if r.method == "POST"]) == 1
+
+
+def test_other_invalid_requests_keep_their_status(claude_client, claude_backend):
+    claude_backend.status = 400
+    claude_backend.error_type = "invalid_request_error"
+    claude_backend.error_message = "messages: text content blocks must be non-empty"
+    response = claude_client.post("/api/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"
+
+
 def test_structured_output_mode_is_explicit_and_validated(tmp_path, monkeypatch):
     monkeypatch.setenv("CHATGPT_GATEWAY_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("CHATGPT_GATEWAY_ANTHROPIC_STRUCTURED_OUTPUT", raising=False)
