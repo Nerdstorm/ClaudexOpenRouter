@@ -64,7 +64,8 @@ Partial output, truncation, multiple turns, missing completion/model evidence an
 substitution fail explicitly. Native API retry notifications terminate the task; no replay is
 initiated by the gateway. Completed invalid JSON is HTTP 422 with safe validation details and
 known usage; a correction requires a new caller request. HTTP disconnects/timeouts kill the
-native process group and release both admission pools.
+native process group and release both admission pools. Waiting for capacity uses the same
+bounded queue as the API and image routes: 48 waiting requests and 120 seconds by default.
 
 Each request benchmarks Claude Code's harness with a replaced system prompt and disabled tools,
 not an identical bare Messages API transaction. See [setup, account controls and process details](configuration.md#native-claude-subscription-worker).
@@ -139,8 +140,9 @@ is unknown. No cost or zero usage is invented. Headers expose `x-gateway-provide
 These are Codex account controls, not a claim to fulfil OpenRouter's data-collection contract.
 
 The image cap defaults to **1 within the shared 12 calls**, with no separate allowance or
-additional 12-call pool. A saturated image or shared pool returns `429 gateway_busy` after
-at most one second, with `Retry-After:1`. Requests have the shared timeout (600 seconds by
+additional 12-call pool. A saturated image or shared pool waits in the gateway's bounded
+queue (48 requests, 120 seconds by default). A full queue or expired wait returns
+`429 gateway_busy` with `Retry-After:1`. Requests have the total timeout (600 seconds by
 default); cancellation stops their native process group and cleans request artifacts.
 Completed turns without valid current-thread images fail with `422 image_not_produced` and
 known agent usage. Missing completion fails with `502 incomplete_stream`; native usage-limit

@@ -14,11 +14,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
-from starlette.datastructures import UploadFile
+from starlette.datastructures import Headers, MutableHeaders, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
+from .admission import Admission
 from .anthropic_protocol import JSON_INSTRUCTION_VERSION, claude_request
 from .anthropic_upstream import ClaudeClient
 from .auth import Auth
@@ -58,6 +60,38 @@ def sse(value: dict | str) -> bytes:
     return f"data: {payload}\n\n".encode()
 
 
+class LocalBoundary:
+    """Preserve the HTTP receive channel so queued callers can disconnect."""
+
+    def __init__(self, app: ASGIApp, base_url: str):
+        self.app, self.base_url = app, base_url
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def secured_send(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["cache-control"] = "no-store"
+                headers["x-content-type-options"] = "nosniff"
+            await send(message)
+
+        origin = Headers(scope=scope).get("origin")
+        if origin and origin != self.base_url:
+            response = JSONResponse(
+                {
+                    "error": {
+                        "message": "Cross-origin requests are disabled.",
+                        "code": "foreign_origin",
+                    }
+                },
+                status_code=403,
+            )
+            return await response(scope, receive, secured_send)
+        await self.app(scope, receive, secured_send)
+
+
 async def read_bytes(request: Request, limit: int) -> bytes:
     data = bytearray()
     async for chunk in request.stream():
@@ -80,21 +114,21 @@ async def read_body(request: Request, limit: int) -> dict[str, Any]:
         raise GatewayError(400, "Send a JSON object.", "invalid_json") from error
 
 
+async def disconnected(request: Request, stopped: asyncio.Event):
+    while not stopped.is_set():
+        if await request.is_disconnected():
+            return
+        try:
+            await asyncio.wait_for(stopped.wait(), 0.25)
+        except TimeoutError:
+            pass
+
+
 async def completed_job(request: Request, work):
-    """Cancel a native worker when its HTTP client goes away."""
+    """Cancel queued or running work when its HTTP client goes away."""
     job = asyncio.create_task(work)
     stopped = asyncio.Event()
-
-    async def disconnected():
-        while not stopped.is_set():
-            if await request.is_disconnected():
-                return
-            try:
-                await asyncio.wait_for(stopped.wait(), 0.25)
-            except TimeoutError:
-                pass
-
-    disconnect = asyncio.create_task(disconnected())
+    disconnect = asyncio.create_task(disconnected(request, stopped))
     try:
         done, _ = await asyncio.wait([job, disconnect], return_when=asyncio.FIRST_COMPLETED)
         if job not in done:
@@ -105,6 +139,56 @@ async def completed_job(request: Request, work):
         stopped.set()
         job.cancel()
         await asyncio.gather(job, disconnect, return_exceptions=True)
+
+
+async def managed_events(request: Request, events, *, streaming: bool):
+    """Keep transport/timeout ownership in one task, including before streaming headers."""
+    queue = asyncio.Queue(maxsize=1)
+    stopped = asyncio.Event()
+
+    async def produce():
+        try:
+            async for event in events:
+                await queue.put(event)
+        finally:
+            await events.aclose()
+
+    producer = asyncio.create_task(produce())
+    disconnect = asyncio.create_task(disconnected(request, stopped))
+    pending = None
+    try:
+        while True:
+            pending = asyncio.create_task(queue.get())
+            watched = {pending, producer}
+            if disconnect is not None:
+                watched.add(disconnect)
+            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+            if disconnect is not None and disconnect in done:
+                raise GatewayError(499, "The client disconnected.", "client_disconnected")
+            if pending not in done and producer in done and queue.empty():
+                if producer.cancelled():
+                    raise GatewayError(504, "The inference timed out.", "upstream_timeout")
+                await producer
+                return
+            event = await pending
+            pending = None
+            if streaming and disconnect is not None:
+                # StreamingResponse owns HTTP disconnects once the first event is ready.
+                stopped.set()
+                await disconnect
+                disconnect = None
+            yield event
+    finally:
+        stopped.set()
+        producer.cancel()
+        if pending is not None:
+            pending.cancel()
+        await asyncio.gather(
+            producer,
+            *([pending] if pending is not None else []),
+            *([disconnect] if disconnect is not None else []),
+            return_exceptions=True,
+        )
 
 
 async def read_image_body(request: Request, limit: int) -> dict[str, Any]:
@@ -168,10 +252,19 @@ def create_app(
             ) as client:
                 app.state.auth = Auth(store, client, settings.callback_uri)
                 slots = asyncio.Semaphore(settings.max_concurrency)
-                app.state.plan = PlanClient(settings, store, app.state.auth, client, slots=slots)
-                app.state.claude = ClaudeClient(settings, store, client, slots=slots)
-                app.state.images = CodexImageClient(settings, store, slots=slots)
-                app.state.claude_code = ClaudeCodeClient(settings, store, slots=slots)
+                admission = app.state.admission = Admission(settings)
+                app.state.plan = PlanClient(
+                    settings, store, app.state.auth, client, slots=slots, admission=admission
+                )
+                app.state.claude = ClaudeClient(
+                    settings, store, client, slots=slots, admission=admission
+                )
+                app.state.images = CodexImageClient(
+                    settings, store, slots=slots, admission=admission
+                )
+                app.state.claude_code = ClaudeCodeClient(
+                    settings, store, slots=slots, admission=admission
+                )
                 yield
         finally:
             lock.release()
@@ -192,24 +285,7 @@ def create_app(
         allowed_hosts=["127.0.0.1", "localhost", "[::1]", "host.docker.internal"],
     )
 
-    @app.middleware("http")
-    async def local_boundary(request: Request, call_next):
-        # Cookies are never used for API authentication; foreign web pages cannot start actions.
-        origin = request.headers.get("origin")
-        if origin and origin != settings.base_url:
-            return JSONResponse(
-                {
-                    "error": {
-                        "message": "Cross-origin requests are disabled.",
-                        "code": "foreign_origin",
-                    }
-                },
-                status_code=403,
-            )
-        response = await call_next(request)
-        response.headers["cache-control"] = "no-store"
-        response.headers["x-content-type-options"] = "nosniff"
-        return response
+    app.add_middleware(LocalBoundary, base_url=settings.base_url)
 
     @app.exception_handler(GatewayError)
     async def handle_gateway_error(request: Request, error: GatewayError):
@@ -286,8 +362,12 @@ def create_app(
                 "images_use_shared_pool": True,
                 "claude_code_max": settings.claude_code_max_concurrency,
                 "claude_code_uses_shared_pool": True,
-                "admission_timeout_seconds": 1,
-                "queue": False,
+                "admission_timeout_seconds": settings.admission_timeout_seconds,
+                "queue": settings.max_queued_requests > 0,
+                "queue_max": settings.max_queued_requests,
+                "queue_persistent": False,
+                "waiting": app.state.admission.waiting,
+                "active": app.state.admission.active,
             },
             "responses": True,
             "structured_output": "subject_to_model_access",
@@ -595,7 +675,9 @@ def create_app(
             headers["x-gateway-structured-output-version"] = prepared.structured_output_version
         if prepared.data_policy_override:
             headers["x-gateway-policy-override"] = "provider.data_collection"
-        events = annotated_events(events, headers)
+        events = managed_events(
+            request, annotated_events(events, headers), streaming=prepared.stream
+        )
         if not prepared.stream:
             try:
                 async for event in events:

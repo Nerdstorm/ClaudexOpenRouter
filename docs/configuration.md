@@ -32,7 +32,9 @@ All commands use the same environment settings. Put `--port` before the command 
 | `CHATGPT_GATEWAY_DATA_DIR` | `~/.local/share/chatgpt-plan-gateway` |
 | `CHATGPT_GATEWAY_PORT` | `8317` |
 | `CHATGPT_GATEWAY_MAX_CONCURRENCY` | `12` |
-| `CHATGPT_GATEWAY_TIMEOUT_SECONDS` | `600` |
+| `CHATGPT_GATEWAY_ADMISSION_TIMEOUT_SECONDS` | `120`; positive, finite maximum wait for capacity |
+| `CHATGPT_GATEWAY_MAX_QUEUED_REQUESTS` | `48`; maximum waiting requests across all providers, `0` refuses immediately when busy |
+| `CHATGPT_GATEWAY_TIMEOUT_SECONDS` | `600`; total capacity-wait plus execution budget |
 | `CHATGPT_GATEWAY_MAX_REQUEST_BYTES` | `8388608` (8 MiB) |
 | `CHATGPT_GATEWAY_CODEX_IMAGES` | `0`; set `1` to enable native Codex default image generation |
 | `CHATGPT_GATEWAY_CODEX_BINARY` | `codex`; executable name or absolute path |
@@ -69,11 +71,20 @@ Codex images and Claude Code. The shared maximum defaults to 12; the nested imag
 Claude Code maxima each default to 1.
 An image takes one image slot and one shared slot. Images waiting for their narrower pool do
 not consume text capacity. For example, 11 text calls plus 1 image fill the default pool.
-Set both variables before starting the server to change them. Image concurrency cannot exceed
-the shared maximum. Busy admission returns `429 gateway_busy` after at most one second, with
-`Retry-After: 1`; no persistent work queue or automatic inference retry is added.
+Set the variables before starting the server to change them. Image and Claude concurrency cannot
+exceed the shared maximum. All transports share one bounded waiting budget: at most 48 requests,
+each waiting at most 120 seconds by default, or the remaining total request timeout if shorter.
+Acquire the narrower image/Claude pool before the shared slot, so requests waiting for their
+own pool do not occupy shared execution slots. Eligible text calls can proceed while images wait.
+Waiting is in memory, with no durable job, inference replay or automatic model retry. Queue
+capacity is returned on cancellation, HTTP disconnect or timeout. A full queue or exhausted
+waiting budget returns `429 gateway_busy`, with `Retry-After: 1`. Provider quota refusals are
+still returned directly. Clients should allow for the total request timeout.
 The authenticated capability endpoint reports `max_concurrency` and
-`concurrency.{shared_max,image_max,claude_code_max,images_use_shared_pool,claude_code_uses_shared_pool,admission_timeout_seconds,queue}`.
+`concurrency.{shared_max,image_max,claude_code_max,images_use_shared_pool,claude_code_uses_shared_pool,admission_timeout_seconds,queue,queue_max,queue_persistent,waiting,active}`.
+`active` counts requests holding execution slots; `waiting` counts requests waiting for either
+pool. Completed request journal entries include `admission_wait_ms` separately from execution
+`duration_ms` and `first_token_ms`, so queueing does not look like slower model generation.
 Application batch/job limits and upstream account quotas are separate. A local cap does not
 increase allowance or guarantee that the provider accepts that many concurrent tasks.
 
@@ -160,7 +171,7 @@ are rejected. The worker validates and returns a PNG, then removes its temporary
 and current-thread generated images. Raw CLI output and prompts are never journalled.
 Timeouts and caller disconnects terminate the worker process group and release both pools.
 
-`CHATGPT_GATEWAY_TIMEOUT_SECONDS` also bounds image tasks, including native login preflight;
+`CHATGPT_GATEWAY_TIMEOUT_SECONDS` also bounds image tasks, including capacity wait and native login preflight;
 it defaults to 600 seconds. CLI output and returned images have size limits. Malformed or
 missing artifacts after a completed turn return `422 image_not_produced`; a partial turn is
 not success. Usage limits fail explicitly. There is no gateway retry to regenerate an image.
@@ -195,7 +206,7 @@ not certify OpenRouter's policy or change model selection or billing. Both defau
 | --- | --- |
 | Local `401 invalid_api_key` | Use the key from `chatgpt-gateway key`, not a vendor key. |
 | `sign_in_expired` or repeated `token_expired` | Run `chatgpt-gateway login` again. Eligible token renewal is automatic, with at most one retry of an explicitly rejected request. |
-| `429 gateway_busy` | Queue calls in your client; the gateway's default shared concurrency is 12. |
+| `429 gateway_busy` | The bounded waiting queue is full or its deadline expired. Reduce demand or adjust the waiting limit/budget; shared execution stays at 12 by default. |
 | Codex image entry missing | Enable `CHATGPT_GATEWAY_CODEX_IMAGES=1`, check the executable and ChatGPT native login, then inspect `capabilities`. Readiness caches for 15 seconds. |
 | Image model, size or quality refused | Only `codex/imagegen` and default (`auto`) settings are supported; see the image contract. |
 | Upstream usage limit or insufficient credits | Check the selected provider's account limits and billing. The gateway never changes providers to get around them. |

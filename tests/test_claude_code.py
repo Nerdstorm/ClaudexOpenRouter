@@ -453,7 +453,11 @@ def test_ordered_context_and_original_schema_are_preserved(settings):
 async def test_timeout_cancellation_and_both_admission_limits(native_claude, store):
     mode("hang")
     pool = asyncio.Semaphore(1)
-    native = ClaudeCodeClient(replace(native_claude, timeout_seconds=0.2), store, slots=pool)
+    native = ClaudeCodeClient(
+        replace(native_claude, timeout_seconds=0.2, admission_timeout_seconds=0.02),
+        store,
+        slots=pool,
+    )
     prepared = subscription_request(REQUEST, native_claude)
     with pytest.raises(GatewayError) as error:
         await native.generate(prepared, request_id="timeout", client_name="test")
@@ -483,6 +487,76 @@ async def test_timeout_cancellation_and_both_admission_limits(native_claude, sto
         await native.generate(prepared, request_id="shared_busy", client_name="test")
     assert busy.value.code == "gateway_busy" and native._native_slots._value == 1
     pool.release()
+
+
+async def test_http_thirteenth_subscription_call_waits_without_exceeding_twelve(
+    native_claude, store, backend, monkeypatch
+):
+    settings = replace(native_claude, claude_code_max_concurrency=12)
+    app = create_app(settings, transport=httpx.MockTransport(backend.handler))
+    async with app.router.lifespan_context(app):
+        native = app.state.claude_code
+        inspect = native.availability
+        entered, release = asyncio.Event(), asyncio.Event()
+        count = 0
+
+        async def wait_for_release(**kwargs):
+            nonlocal count
+            count += 1
+            if count == 12:
+                entered.set()
+            await release.wait()
+            return await inspect(**kwargs)
+
+        monkeypatch.setattr(native, "availability", wait_for_release)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app),
+            base_url=settings.base_url,
+            headers={"authorization": f"Bearer {store.api_key}"},
+        ) as client:
+            tasks = [
+                asyncio.create_task(
+                    client.post(
+                        "/claude-code/v1/chat/completions",
+                        json={
+                            **REQUEST,
+                            "model": MODEL if index % 2 else "anthropic/claude-opus-5.5",
+                        },
+                    )
+                )
+                for index in range(12)
+            ]
+            try:
+                await asyncio.wait_for(entered.wait(), 3)
+                extra = asyncio.create_task(
+                    client.post(
+                        "/claude-code/v1/chat/completions",
+                        json=REQUEST,
+                    )
+                )
+                tasks.append(extra)
+                await asyncio.sleep(1.05)
+                assert count == app.state.admission.active == 12
+                assert app.state.admission.waiting == 1 and not extra.done()
+                release.set()
+                responses = await asyncio.wait_for(asyncio.gather(*tasks), 10)
+                assert all(r.status_code == 200 for r in responses)
+                assert all(
+                    r.headers["x-gateway-billing-source"] == "claude_subscription"
+                    for r in responses
+                )
+                assert len(calls()) == 13 and not backend.requests
+                last_id = responses[-1].headers["x-gateway-request-id"]
+                events = [e for e in store.recent(100) if e["request_id"] == last_id]
+                assert events[-1]["event"] == "completed"
+                assert events[-1]["admission_wait_ms"] >= 1000
+            finally:
+                release.set()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        assert app.state.admission.active == app.state.admission.waiting == 0
+        assert native._slots._value == native._native_slots._value == 12
 
 
 async def test_http_disconnect_cancels_native_work():

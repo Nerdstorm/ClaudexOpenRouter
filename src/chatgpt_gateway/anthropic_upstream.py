@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 import anthropic
 import httpx
 
+from .admission import Admission
 from .anthropic_protocol import CLAUDE_MODELS, cache_policy, claude_usage
 from .config import Settings
 from .errors import GatewayError
@@ -88,8 +89,10 @@ class ClaudeClient:
         client: httpx.AsyncClient,
         *,
         slots: asyncio.Semaphore,
+        admission: Admission | None = None,
     ):
         self.settings, self.store, self._slots = settings, store, slots
+        self._admission = admission if admission is not None else Admission(settings)
         self.api = (
             anthropic.AsyncAnthropic(
                 api_key=settings.anthropic_api_key,
@@ -149,18 +152,15 @@ class ClaudeClient:
         client_name: str,
     ) -> AsyncIterator[dict]:
         api = self.require_api()
-        try:
-            await asyncio.wait_for(self._slots.acquire(), timeout=1)
-        except TimeoutError as error:
-            raise GatewayError(
-                429, "The gateway is busy. Try again shortly.", "gateway_busy", retry_after="1"
-            ) from error
+        lease = await self._admission.acquire(
+            self._slots, timeout_seconds=self.settings.timeout_seconds
+        )
         started, first_token = time.monotonic(), None
         outcome, status, code = "interrupted", 499, None
         usage, upstream_id, began = None, None, False
         native = prepared.body["model"]
         try:
-            async with asyncio.timeout(self.settings.timeout_seconds):
+            async with asyncio.timeout_at(lease.deadline):
                 rows = await self.catalog()
                 if requested_model not in {r["id"] for r in rows}:
                     raise GatewayError(
@@ -173,6 +173,7 @@ class ClaudeClient:
                     {
                         "request_id": request_id,
                         "event": "started",
+                        "admission_wait_ms": lease.wait_ms,
                         "endpoint": endpoint,
                         "requested_model": requested_model,
                         "model": native,
@@ -354,7 +355,7 @@ class ClaudeClient:
             outcome, status, code = "failed", error.status, error.code
             raise
         finally:
-            self._slots.release()
+            lease.release()
             if began:
                 self.store.journal(
                     {
@@ -368,6 +369,7 @@ class ClaudeClient:
                         "provider": "anthropic",
                         "billing_source": "anthropic_api",
                         "duration_ms": round((time.monotonic() - started) * 1000),
+                        "admission_wait_ms": lease.wait_ms,
                         "first_token_ms": first_token,
                         "upstream_request_id": upstream_id,
                         "usage": claude_usage(usage, self.settings.anthropic_rates, native),

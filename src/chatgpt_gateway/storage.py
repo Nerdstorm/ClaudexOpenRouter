@@ -104,6 +104,7 @@ class Store:
             "account",
             "body_sha256",
             "duration_ms",
+            "admission_wait_ms",
             "status",
             "code",
             "upstream_request_id",

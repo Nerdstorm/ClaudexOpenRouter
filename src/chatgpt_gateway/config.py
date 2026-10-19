@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,8 @@ class Settings:
     data_dir: Path
     port: int = 8317
     max_concurrency: int = 12
+    admission_timeout_seconds: float = 120
+    max_queued_requests: int = 48
     timeout_seconds: float = 600
     max_request_bytes: int = 8 * 1024 * 1024
     accept_chatgpt_data_controls: bool = False
@@ -107,6 +110,10 @@ class Settings:
             data_dir=data_dir,
             port=int(os.environ.get("CHATGPT_GATEWAY_PORT", "8317")),
             max_concurrency=int(os.environ.get("CHATGPT_GATEWAY_MAX_CONCURRENCY", "12")),
+            admission_timeout_seconds=float(
+                os.environ.get("CHATGPT_GATEWAY_ADMISSION_TIMEOUT_SECONDS", "120")
+            ),
+            max_queued_requests=int(os.environ.get("CHATGPT_GATEWAY_MAX_QUEUED_REQUESTS", "48")),
             timeout_seconds=float(os.environ.get("CHATGPT_GATEWAY_TIMEOUT_SECONDS", "600")),
             max_request_bytes=int(os.environ.get("CHATGPT_GATEWAY_MAX_REQUEST_BYTES", "8388608")),
             accept_chatgpt_data_controls=data_controls == "1",
@@ -144,6 +151,15 @@ class Settings:
             raise ValueError("CHATGPT_GATEWAY_PORT must be between 1 and 65535")
         if settings.max_concurrency < 1 or settings.timeout_seconds <= 0:
             raise ValueError("Concurrency and timeout must be positive")
+        if not math.isfinite(settings.timeout_seconds):
+            raise ValueError("Timeout must be finite")
+        if (
+            not math.isfinite(settings.admission_timeout_seconds)
+            or settings.admission_timeout_seconds <= 0
+        ):
+            raise ValueError("Admission timeout must be positive and finite")
+        if settings.max_queued_requests < 0:
+            raise ValueError("Maximum queued requests must be nonnegative")
         if settings.max_request_bytes < 1024:
             raise ValueError("Maximum request size must be at least 1024 bytes")
         if not 1 <= settings.image_max_concurrency <= settings.max_concurrency:

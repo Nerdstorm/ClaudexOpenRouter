@@ -52,6 +52,7 @@ Code text sessions; native clients retain ownership of their own credentials.
 | `image_protocol.py` | Default-image capability alias, strict image request subset and validated reference formats |
 | `codex_images.py` | Native ChatGPT-authenticated CLI worker, readiness, nested admission, bounded subprocess lifecycle, current-thread artifacts and actual agent usage |
 | `upstream.py` | Account catalog, model admission, bounded concurrency, public HTTP/SSE, terminal validation and journal outcomes |
+| `admission.py` | Shared bounded capacity waiting, narrow/shared slot leases, cancellation cleanup and total request deadlines |
 | `app.py` | Local authentication, host/origin boundary, body limits, routes and streaming adaptation |
 | `cli.py` | Server lifecycle, browser sign-in and local management commands |
 | `static/` | Callback page markup and shared stylesheet |
@@ -71,6 +72,19 @@ Official contracts: [sign-in](https://developers.openai.com/siwc/token-sharing-o
 ## Inference lifecycle
 
 After local validation, the server acquires a concurrency slot, obtains renewable credentials, and checks the exact model against the selected account's catalog. Catalogues used for inference are cached for 60 seconds per registration. On a temporary listing failure (transport, 408/429/selected 5xx or `401 token_expired`), an existing same-registration list may be used for at most five minutes from its successful fetch, with subsequent listing attempts spaced 15 seconds apart. A failure never extends that age. Explicit external model-list requests remain fresh and report errors. Definite grant/authorization errors discard the cache. A listing is not an access guarantee: the exact requested model must be on that list and inference still authenticates upstream.
+
+One `Admission` instance is shared by all four transports. Busy calls wait in memory within
+both a time budget (120 seconds) and a count budget (48 requests), without starting upstream
+inference. Narrow image/native pools precede the shared semaphore. The acquired lease owns
+both slots and their release, and its deadline includes queueing in the total request budget.
+Cancellation and partial acquisition return all permits. Queue timing is journal metadata;
+it never changes model usage or prices. Runtime counters are exposed in capabilities.
+
+The HTTP boundary uses ASGI middleware so the receive channel preserves disconnects while
+requests wait. API event iteration stays in one producer task, including the initial event
+before streaming headers, so timeout scopes and cleanup do not change task ownership. A
+one-event buffer limits producer lookahead; disconnects cancel queued/running work. Once
+streaming starts, the response owns disconnect monitoring and closes the producer on exit.
 
 Every OpenAI upstream inference uses `POST https://api.openai.com/v1/responses`, `store:false`, and `stream:true`. The client sends all required history. Nonstreaming clients receive an object only after `response.completed`; streaming clients receive events/chunks, and a finish marker is emitted only after validated completion. JSON-format requests are checked locally at completion. Refusals retain their own representation.
 

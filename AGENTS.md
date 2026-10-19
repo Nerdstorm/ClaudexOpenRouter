@@ -12,6 +12,7 @@
 - Never log credentials, authorization URLs, prompts, response bodies or schema contents. The request journal records identifiers, hashes, settings, status and usage only.
 - Preserve exact model selection and fail explicitly on unsupported parameters, missing grants, exhausted limits and interrupted streams. Do not add model or billing fallbacks.
 - Keep configuration, credential storage, OAuth, protocol translation and upstream transport separate and test their boundaries.
+- All model transports share bounded in-memory admission waiting. Keep active calls capped independently of waiting requests, acquire narrow pools before shared capacity, include waiting in the total deadline and release every permit on cancellation/disconnect. Never persist/replay queued inference or retry it automatically. Disclose queue limits and timing in capabilities/docs; keep queue latency separate from model latency and usage.
 - The server binds to loopback by default and requires its own local bearer key. Authenticate management actions too. OAuth callback access logs must remain disabled.
 - Keep UI presentation in external stylesheets if a UI is added; no inline styles or CSS-in-JS.
 - Run `uv run ruff check .`, `uv run ruff format --check .` and `uv run pytest` after changes. Update README and compatibility documentation alongside protocol changes.

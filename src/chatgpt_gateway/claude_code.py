@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .admission import Admission
 from .anthropic_protocol import CLAUDE_MODELS, JSON_INSTRUCTION_VERSION, claude_usage
 from .claude_code_protocol import CLAUDE_CODE_CONTRACT, ClaudeCodeRequest
 from .config import Settings
@@ -71,8 +72,16 @@ def native_error(event: dict) -> GatewayError:
 
 
 class ClaudeCodeClient:
-    def __init__(self, settings: Settings, store: Store, *, slots: asyncio.Semaphore):
+    def __init__(
+        self,
+        settings: Settings,
+        store: Store,
+        *,
+        slots: asyncio.Semaphore,
+        admission: Admission | None = None,
+    ):
         self.settings, self.store, self._slots = settings, store, slots
+        self._admission = admission if admission is not None else Admission(settings)
         self._native_slots = asyncio.Semaphore(settings.claude_code_max_concurrency)
         self._availability: tuple[float, dict] | None = None
         self._availability_lock = asyncio.Lock()
@@ -167,23 +176,9 @@ class ClaudeCodeClient:
     async def generate(
         self, prepared: ClaudeCodeRequest, *, request_id: str, client_name: str
     ) -> dict:
-        native_slot = shared_slot = False
-        try:
-            async with asyncio.timeout(1):
-                await self._native_slots.acquire()
-                native_slot = True
-                await self._slots.acquire()
-                shared_slot = True
-        except TimeoutError as error:
-            if native_slot:
-                self._native_slots.release()
-            raise GatewayError(
-                429, "The Claude Code or shared pool is busy.", "gateway_busy", retry_after="1"
-            ) from error
-        except BaseException:
-            if native_slot:
-                self._native_slots.release()
-            raise
+        lease = await self._admission.acquire(
+            self._native_slots, self._slots, timeout_seconds=self.settings.timeout_seconds
+        )
         started, first_token = time.monotonic(), None
         outcome, status, code, began = "interrupted", 499, None, False
         process, usage, turns, retries = None, None, None, 0
@@ -196,6 +191,7 @@ class ClaudeCodeClient:
             "provider": "claude_code",
             "billing_source": "claude_subscription",
             "client": client_name,
+            "admission_wait_ms": lease.wait_ms,
             "stream": False,
             "reasoning": prepared.effort,
             "format": (prepared.schema or {}).get("type", "text"),
@@ -210,7 +206,7 @@ class ClaudeCodeClient:
             else None,
         }
         try:
-            async with asyncio.timeout(self.settings.timeout_seconds):
+            async with asyncio.timeout_at(lease.deadline):
                 # Fresh credentials check per request; never use a cached signed-in state
                 # to continue after the user has switched native billing profiles.
                 ready = await self.availability(fresh=True)
@@ -490,10 +486,7 @@ class ClaudeCodeClient:
             if stderr_task:
                 stderr_task.cancel()
                 await asyncio.gather(stderr_task, return_exceptions=True)
-            if shared_slot:
-                self._slots.release()
-            if native_slot:
-                self._native_slots.release()
+            lease.release()
             if began:
                 self.store.journal(
                     {

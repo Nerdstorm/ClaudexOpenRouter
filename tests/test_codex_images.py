@@ -124,8 +124,12 @@ def test_catalog_and_capabilities_distinguish_default_engine_and_shared_limits(i
         "images_use_shared_pool": True,
         "claude_code_max": 1,
         "claude_code_uses_shared_pool": True,
-        "admission_timeout_seconds": 1,
-        "queue": False,
+        "admission_timeout_seconds": 120,
+        "queue": True,
+        "queue_max": 48,
+        "queue_persistent": False,
+        "waiting": 0,
+        "active": 0,
     }
     assert caps["providers"]["codex"]["quality"] == ["auto"]
 
@@ -326,7 +330,7 @@ async def test_timeout_and_cancellation_kill_worker_and_release_slots(codex, sto
 
 async def test_image_pool_shares_global_capacity_and_rejects_busy(codex, store, monkeypatch):
     slots = asyncio.Semaphore(2)
-    worker = CodexImageClient(codex, store, slots=slots)
+    worker = CodexImageClient(replace(codex, admission_timeout_seconds=0.02), store, slots=slots)
     running, release = asyncio.Event(), asyncio.Event()
 
     async def execute(_):
@@ -355,7 +359,7 @@ async def test_image_pool_shares_global_capacity_and_rejects_busy(codex, store, 
 
 async def test_full_shared_pool_cannot_be_bypassed_by_image_pool(codex, store, monkeypatch):
     slots = asyncio.Semaphore(0)
-    worker = CodexImageClient(codex, store, slots=slots)
+    worker = CodexImageClient(replace(codex, admission_timeout_seconds=0.02), store, slots=slots)
     with pytest.raises(GatewayError) as busy:
         await worker.generate(
             ImageRequest("test"), request_id="busy", endpoint="test", client_name="test"

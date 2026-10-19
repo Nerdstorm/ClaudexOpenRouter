@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .admission import Admission
 from .config import Settings
 from .errors import GatewayError
 from .image_protocol import IMAGE_MODEL, MAX_IMAGE_BYTES, ImageRequest, image_type
@@ -92,8 +93,16 @@ def cleanup_artifacts(events: list[dict]) -> None:
 
 
 class CodexImageClient:
-    def __init__(self, settings: Settings, store: Store, *, slots: asyncio.Semaphore):
+    def __init__(
+        self,
+        settings: Settings,
+        store: Store,
+        *,
+        slots: asyncio.Semaphore,
+        admission: Admission | None = None,
+    ):
         self.settings, self.store, self._slots = settings, store, slots
+        self._admission = admission if admission is not None else Admission(settings)
         self._image_slots = asyncio.Semaphore(settings.image_max_concurrency)
         self._availability: tuple[float, dict] | None = None
         self._availability_lock = asyncio.Lock()
@@ -173,24 +182,9 @@ class CodexImageClient:
     async def generate(
         self, prepared: ImageRequest, *, request_id: str, endpoint: str, client_name: str
     ) -> dict:
-        # Acquire the narrower image pool first: waiting images must not occupy text slots.
-        image_slot = shared_slot = False
-        try:
-            async with asyncio.timeout(1):
-                await self._image_slots.acquire()
-                image_slot = True
-                await self._slots.acquire()
-                shared_slot = True
-        except TimeoutError as error:
-            if image_slot:
-                self._image_slots.release()
-            raise GatewayError(
-                429, "The image or shared gateway pool is busy.", "gateway_busy", retry_after="1"
-            ) from error
-        except BaseException:
-            if image_slot:
-                self._image_slots.release()
-            raise
+        lease = await self._admission.acquire(
+            self._image_slots, self._slots, timeout_seconds=self.settings.timeout_seconds
+        )
         started = time.monotonic()
         outcome, status, code, began, usage = "interrupted", 499, None, False, None
         metadata = {
@@ -201,6 +195,7 @@ class CodexImageClient:
             "provider": "codex",
             "billing_source": "codex_plan",
             "client": client_name,
+            "admission_wait_ms": lease.wait_ms,
             "stream": False,
             "format": "image/png",
             "image_model": "codex_default",
@@ -208,7 +203,7 @@ class CodexImageClient:
             "data_policy_override": prepared.data_policy_override,
         }
         try:
-            async with asyncio.timeout(self.settings.timeout_seconds):
+            async with asyncio.timeout_at(lease.deadline):
                 ready = await self.availability()
                 if not ready["ready"]:
                     raise GatewayError(
@@ -246,9 +241,7 @@ class CodexImageClient:
             usage = (error.body or {}).get("gateway_usage", usage)
             raise
         finally:
-            if shared_slot:
-                self._slots.release()
-            self._image_slots.release()
+            lease.release()
             self.store.journal(
                 {
                     **metadata,

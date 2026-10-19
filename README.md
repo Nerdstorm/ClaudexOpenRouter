@@ -57,11 +57,16 @@ explicit overrides are rejected. Output is PNG, inline base64, without streaming
 | All model calls combined, across all clients and providers | **12** | `CHATGPT_GATEWAY_MAX_CONCURRENCY` |
 | Image tasks within that shared pool | **1** | `CHATGPT_GATEWAY_IMAGE_MAX_CONCURRENCY` |
 | Claude Code subscription tasks within that shared pool | **1** | `CHATGPT_GATEWAY_CLAUDE_CODE_MAX_CONCURRENCY` |
+| Requests waiting for capacity, across all providers | **48** | `CHATGPT_GATEWAY_MAX_QUEUED_REQUESTS` |
+| Maximum wait for capacity | **120 seconds** | `CHATGPT_GATEWAY_ADMISSION_TIMEOUT_SECONDS` |
 
 An image task occupies one of the 12 shared slots: this is **12 total, including at most
 1 image**, not 12 text calls plus another image. The image limit can be raised up to the shared
-limit. Busy admission waits up to one second, then returns `429 gateway_busy` with `Retry-After: 1`;
-clients own their queues and retry policy. These settings do not increase provider/account quotas.
+limit. When capacity is busy, requests wait in a bounded in-memory queue. Waiting does not
+start inference and counts toward the total request timeout (600 seconds by default).
+A full queue or expired waiting deadline returns `429 gateway_busy` with `Retry-After: 1`.
+Disconnecting cancels waiting or running work; queued requests are not persisted or replayed
+after a restart. These settings do not increase provider/account quotas or retry an inference.
 Inspect effective settings with `uv run chatgpt-gateway capabilities`.
 Claude subscription tasks also take one shared slot and one slot from their own nested pool.
 Their default cap of one is a conservative local setting, not a measured Claude account limit.

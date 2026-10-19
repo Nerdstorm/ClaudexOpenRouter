@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .admission import Admission
 from .auth import Auth
 from .config import RESOURCE, Settings
 from .errors import GatewayError
@@ -88,9 +89,11 @@ class PlanClient:
         client: httpx.AsyncClient,
         *,
         slots: asyncio.Semaphore | None = None,
+        admission: Admission | None = None,
     ):
         self.settings, self.store, self.auth, self.client = settings, store, auth, client
         self._slots = slots if slots is not None else asyncio.Semaphore(settings.max_concurrency)
+        self._admission = admission if admission is not None else Admission(settings)
         self._catalog: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._catalog_lock = asyncio.Lock()
         self._catalog_retry_at: dict[str, float] = {}
@@ -223,12 +226,9 @@ class PlanClient:
         requested_model: str,
         client_name: str,
     ) -> AsyncIterator[dict]:
-        try:
-            await asyncio.wait_for(self._slots.acquire(), timeout=1)
-        except TimeoutError as error:
-            raise GatewayError(
-                429, "The gateway is busy. Try again shortly.", "gateway_busy", retry_after="1"
-            ) from error
+        lease = await self._admission.acquire(
+            self._slots, timeout_seconds=self.settings.timeout_seconds
+        )
         started = time.monotonic()
         outcome = "interrupted"
         code = None
@@ -241,7 +241,7 @@ class PlanClient:
         actual_model = prepared.body["model"]
         completed_items: dict[int, dict] = {}
         try:
-            async with asyncio.timeout(self.settings.timeout_seconds):
+            async with asyncio.timeout_at(lease.deadline):
                 account = await self.auth.credentials()
                 models = await self.catalog(account)
                 if actual_model not in {model["canonical_slug"] for model in models}:
@@ -255,6 +255,7 @@ class PlanClient:
                     {
                         "request_id": request_id,
                         "event": "started",
+                        "admission_wait_ms": lease.wait_ms,
                         "endpoint": endpoint,
                         "requested_model": requested_model,
                         "model": actual_model,
@@ -377,7 +378,7 @@ class PlanClient:
             outcome, status, code = "failed", error.status, error.code
             raise
         finally:
-            self._slots.release()
+            lease.release()
             if began or outcome == "failed":
                 self.store.journal(
                     {
@@ -391,6 +392,7 @@ class PlanClient:
                         "provider": "chatgpt_plan",
                         "billing_source": "chatgpt_plan",
                         "duration_ms": round((time.monotonic() - started) * 1000),
+                        "admission_wait_ms": lease.wait_ms,
                         "first_token_ms": first_token_ms,
                         "upstream_request_id": upstream_id,
                         "usage": usage,

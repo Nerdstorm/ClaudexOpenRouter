@@ -722,6 +722,8 @@ def test_secure_key_file_and_settings_validation(tmp_path, monkeypatch):
 
 
 def test_both_providers_share_one_admission_limit(claude_client, claude_backend, backend):
+    claude_client.app.state.admission.timeout = 0.02
+
     async def occupy():
         slots = claude_client.app.state.plan._slots
         for _ in range(12):
