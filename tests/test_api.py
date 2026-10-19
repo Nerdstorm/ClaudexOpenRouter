@@ -56,6 +56,7 @@ def test_catalog_is_account_specific_without_fake_entitlement(client, path):
     "path",
     [
         "/v1/models",
+        "/claude-code/v1/models",
         "/gateway/status",
         "/gateway/accounts",
         "/gateway/requests",
@@ -74,9 +75,12 @@ def test_every_private_read_requires_local_auth(client, path):
         "/gateway/logout",
         "/gateway/accounts/select",
         "/v1/chat/completions",
+        "/claude-code/v1/chat/completions",
         "/v1/responses",
         "/v1/images/generations",
         "/v1/images/edits",
+        "/api/v1/images/generations",
+        "/api/v1/images/edits",
         "/api/v1/images",
     ],
 )

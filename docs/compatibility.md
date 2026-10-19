@@ -1,6 +1,12 @@
-# Compatibility contract (v0.2)
+# Compatibility contract (v0.4)
 
-This is a local adapter for the documented ChatGPT-plan Responses route and official Anthropic Messages API. OpenAI/OpenRouter-shaped paths and supported fields are compatible; complete provider/API parity is not claimed. Unsupported non-null parameters produce a client error before inference. Provider selection follows the exact model id, with no model or provider fallback.
+This is a local adapter for the documented ChatGPT-plan Responses route, official Anthropic
+Messages API, optional native Claude subscription backend and Codex default image worker. OpenAI/OpenRouter-shaped paths
+and supported fields are compatible; complete provider/API parity is not claimed. Unsupported
+non-null parameters produce a client error before inference. Provider selection follows the
+exact model id, with no model or provider fallback.
+The separate `/claude-code/v1` base path explicitly selects subscription usage for Claude;
+the same Claude IDs on the original base paths retain API billing.
 
 ## Routes
 
@@ -9,18 +15,137 @@ All routes in the following table require the local bearer key.
 | Route | Behaviour |
 | --- | --- |
 | `GET /v1/models` or `/api/v1/models` | Real configured-provider catalogues; exact OpenRouter ids, no fabricated prices or access guarantee |
-| `POST /v1/chat/completions` or `/api/v1/chat/completions` | OpenAI text/image input or Claude text; JSON object or Chat SSE output |
+| `POST /v1/chat/completions` or `/api/v1/chat/completions` | OpenAI text/image input, Claude text, or the explicit Codex image subset; images do not stream |
 | `POST /v1/responses` or `/api/v1/responses` | OpenAI-only supported Responses body; object or native SSE events |
 | `GET /gateway/capabilities` | Gateway capability summary, distinct from real model entitlement |
 | `GET /gateway/status`, `/gateway/accounts`, `/gateway/requests` | Connection information and admitted request metadata |
 | `POST /gateway/login`, `/gateway/accounts/select`, `/gateway/logout` | Authorise, select or end a connection |
-| `POST /v1/images/generations`, `/v1/images/edits`, `/api/v1/images` | Explicit `400 unsupported_capability`; no upstream request |
+| `POST /v1/images/generations` or `/api/v1/images/generations` | Optional `codex/imagegen` default image generation; JSON or multipart input, inline PNG output |
+| `POST /v1/images/edits` or `/api/v1/images/edits` | Same worker, requiring 1–5 reference images |
+| `POST /api/v1/images` | Alias for image generation |
+| `GET /claude-code/v1/models` | Native CLI/version/subscription readiness plus gateway-supported Sonnet/Opus IDs; no entitlement guarantee |
+| `POST /claude-code/v1/chat/completions` | Optional subscription text/validated-JSON subset, nonstreaming |
 
 `GET /healthz` and `/` are public local service information. `/auth/callback` is protected by one-time OAuth state/nonce/PKCE instead of a client bearer. Callback stylesheet assets are public. Other paths are outside the contract.
 
 Local containers on Docker Desktop or OrbStack may use `http://host.docker.internal:8317/api/v1`.
 That hostname is admitted alongside the loopback names; the server still binds to `127.0.0.1`,
 requires the local bearer key and rejects foreign browser origins.
+
+## Claude Code subscription
+
+Explicit base URL: `http://127.0.0.1:8317/claude-code/v1`, using the same local bearer key.
+Supported model IDs are exactly `anthropic/claude-sonnet-5.5` and `anthropic/claude-opus-5.5`.
+The original base URLs retain API billing for those IDs. Native discovery checks installation,
+version and subscription sign-in; model entitlement is established only by successful inference.
+
+| Field | Subscription contract |
+| --- | --- |
+| `messages` | Leading system/developer text, then exactly one user message; ordered text blocks are joined with blank lines. No native assistant/history import. |
+| `response_format` | Text or explicit `json_schema`; `validated_json` formatting plus original local validation. No native schema tool/re-prompt loop. |
+| `max_tokens` / `max_completion_tokens` | One ceiling, integer 1–128000, default 32768; mapped to the CLI's documented output ceiling, subject to its model limit. |
+| `reasoning_effort` / `reasoning.effort` | One of low, medium, high, xhigh or max, passed explicitly to the CLI. Native model support still applies. |
+| `stream` | Omitted or false; streaming and stream options are refused. |
+| `provider`, `n`, empty tools | Same explicit provider pins, no fallback, n=1, no function/search tools. Account data controls replace any explicitly enabled OpenRouter data-policy override. |
+| `cache_control` or block cache markers | Refused, including root null. CLI-managed caching does not promise API TTLs, breakpoints or a caller cache opt-out. |
+
+Image input, Responses, temperature/top-p/seed, function/search tools, history replay and
+automatic fallback are outside this contract. Unsupported requests fail before native inference.
+Use the API backend when these supported API features are needed. No history is silently
+flattened, no assistant answer is generated to replay supplied context, and sessions are not resumed.
+
+Completed Chat responses identify `provider:"claude_code"` and keep the requested public model
+ID only after validating exact native model evidence. Headers identify subscription billing,
+native contract and structured-output version. `gateway_usage` includes actual served models,
+turn count and retry-event count. Token/cache usage includes CLI overhead, not just user text.
+The gateway does not expose the CLI's API-equivalent price as cash spend or infer quota percentage.
+
+Partial output, truncation, multiple turns, missing completion/model evidence and tool/billing
+substitution fail explicitly. Native API retry notifications terminate the task; no replay is
+initiated by the gateway. Completed invalid JSON is HTTP 422 with safe validation details and
+known usage; a correction requires a new caller request. HTTP disconnects/timeouts kill the
+native process group and release both admission pools.
+
+Each request benchmarks Claude Code's harness with a replaced system prompt and disabled tools,
+not an identical bare Messages API transaction. See [setup, account controls and process details](configuration.md#native-claude-subscription-worker).
+
+## Codex default image generation
+
+Enable `CHATGPT_GATEWAY_CODEX_IMAGES=1` and native Codex ChatGPT login. The only image model
+ID is **`codex/imagegen`**, a capability alias for **Codex's default image engine**. It is
+not a pinned `gpt-image-*` ID. Sunburst/Flare and other engine selections are refused, not
+translated to the default. `image_model:"codex_default"`, `selectable_image_model:false` in
+discovery, and `image_model_verified:false` distinguish this from verified model selection.
+The default can change with Codex; no underlying snapshot or paid API route is promised.
+
+Generation JSON example:
+
+```json
+{
+  "model": "codex/imagegen",
+  "prompt": "One blue ceramic mug on a white background, no text.",
+  "n": 1
+}
+```
+
+Accepted image fields:
+
+| Field | Contract |
+| --- | --- |
+| `model` | Exactly `codex/imagegen` |
+| `prompt` | Nonempty string, at most 32000 characters |
+| `image` | Optional base64 data URL or list of 1–5 data URLs in JSON; PNG/JPEG/WebP only. Required on edits. Multipart accepts uploaded `image` or repeated `image[]` files. |
+| `n` | Omitted or integer `1`; one final output image per request |
+| `size`, `quality`, `background` | Omitted, null or `auto` only. Other values cannot be enforced through this worker and are refused. |
+| `output_format` | Omitted, null or `png`; worker validates and normalises output to PNG |
+| `response_format` | Omitted, null or `b64_json`; no generated URLs |
+| `stream` | Omitted, null or JSON `false`; no image SSE/partial previews |
+| `provider` | Optional `only:["openai"]`, `allow_fallbacks:false`, `require_parameters` boolean, with existing explicit ChatGPT data-policy handling |
+
+Unknown non-null fields are refused, including engine overrides, seed, masks, crop controls,
+reasoning settings and token ceilings. JSON image references must be inline data URLs: the
+gateway never downloads remote references or accepts caller filesystem paths. Multipart is
+compatible with `OpenAI(...).images.edit(image=("reference.png", bytes, "image/png"), ...)`.
+The combined request limit is 8 MiB by default, including multipart/base64 overhead. Input and
+output are limited to static PNG/JPEG/WebP with at most 20 million pixels; output PNG is capped
+at 32 MiB. Unsupported payloads fail before launching inference.
+
+OpenRouter-shaped image Chat requests use the same backend, with an explicit image model:
+
+```json
+{
+  "model": "codex/imagegen",
+  "modalities": ["image", "text"],
+  "messages": [{"role":"user","content":[
+    {"type":"text","text":"Make the mug blue, preserving the composition."},
+    {"type":"image_url","image_url":{"url":"data:image/png;base64,REFERENCE_BYTES"}}
+  ]}]
+}
+```
+
+This subset accepts user messages only, text and image URL parts (with data URLs only),
+`modalities:["image"]` or either order of `["image","text"]`, optional `n:1`, `stream:false`
+and the same provider pins. It does not reinterpret ordinary OpenAI/Claude text models as
+image generators. Native `/responses` continues to exclude hosted image generation.
+
+Image endpoints return `data[0].b64_json`; Chat returns
+`choices[0].message.images[0].image_url.url` containing a PNG data URL. Both return
+`model:"codex/imagegen"`, `provider:"codex"`, `image_model:"codex_default"`,
+`image_model_verified:false`, `usage:null` and `gateway_usage:{agent:...,image:null}`.
+Agent counters are actual CLI token values, including harness context; image token/cash usage
+is unknown. No cost or zero usage is invented. Headers expose `x-gateway-provider:codex`,
+`x-gateway-billing-source:codex_plan`, `x-gateway-data-controls:codex_account`,
+`x-gateway-image-model:codex_default` and `x-gateway-image-contract-version:codex-image.v1`.
+These are Codex account controls, not a claim to fulfil OpenRouter's data-collection contract.
+
+The image cap defaults to **1 within the shared 12 calls**, with no separate allowance or
+additional 12-call pool. A saturated image or shared pool returns `429 gateway_busy` after
+at most one second, with `Retry-After:1`. Requests have the shared timeout (600 seconds by
+default); cancellation stops their native process group and cleans request artifacts.
+Completed turns without valid current-thread images fail with `422 image_not_produced` and
+known agent usage. Missing completion fails with `502 incomplete_stream`; native usage-limit
+failures return `429 codex_usage_limit`. There is no regeneration retry or engine/billing fallback.
+The model catalogue's `access_verified:false` means readiness is not a live entitlement check.
 
 ## OpenAI Chat Completions input
 
@@ -68,7 +193,13 @@ The placeholder text must be replaced with a real sufficiently long prefix. Exac
 
 Claude completion uses the ordinary Chat object/chunk shape, actual OpenRouter model id and `provider:"anthropic"`. Headers disclose `x-gateway-provider:anthropic`, `x-gateway-billing-source:anthropic_api` and `x-gateway-data-controls:claude_console`. Usage normalizes native `cache_read_input_tokens` and `cache_creation_input_tokens` into `prompt_tokens_details.cached_tokens` and `cache_write_tokens`; total input is uncached + read + write. Original native usage and cache-write lifetime breakdowns are retained in journal usage; unknown counts remain null. Time to first text and total duration are recorded separately. No unverified cash price, balance or included-credit guarantee is fabricated.
 
-The same global concurrency pool limits both providers combined. Anthropic SDK retries are disabled. A validated `message_stop`, completed blocks, correct model, accepted stop reason and original-schema validation are required before success. SSE errors whose transport status is HTTP 200 are translated into failure statuses for nonstreaming clients; streaming clients receive an error without a successful finish marker. `max_tokens`, server-side fallback and tool blocks cannot masquerade as successful answers. Closing or timing out a stream releases its slot and records the outcome.
+The same global concurrency pool limits all providers combined, including Codex images.
+Anthropic SDK retries are disabled. A validated `message_stop`, completed blocks, correct
+model, accepted stop reason and original-schema validation are required before success.
+SSE errors whose transport status is HTTP 200 are translated into failure statuses for
+nonstreaming clients; streaming clients receive an error without a successful finish marker.
+`max_tokens`, server-side fallback and tool blocks cannot masquerade as successful answers.
+Closing or timing out a stream releases its slot and records the outcome.
 
 `provider.only:["anthropic"]`, `allow_fallbacks:false` and `require_parameters` are validated. `provider.data_collection:"deny"` remains refused by default because the gateway cannot attest OpenRouter's policy contract. An explicit `CHATGPT_GATEWAY_ACCEPT_ANTHROPIC_DATA_CONTROLS=1` exception accepts Claude Console controls instead and marks affected responses and journal entries. This is separate from the ChatGPT exception; enabling one never enables the other. The gateway does not inspect or change Console training/retention or billing settings.
 

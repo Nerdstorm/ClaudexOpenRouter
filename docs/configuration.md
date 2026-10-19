@@ -19,6 +19,9 @@ a secret manager or the supported owner-only key file, outside this repository.
 | `use ACCOUNT_ID` | Select a saved registration |
 | `logout` | Attempt remote revocation and clear local tokens; preserves registration |
 | `models` | Refresh the active account's catalog |
+| `models --backend claude-code` | List the separate subscription backend's supported models |
+| `claude-login` / `claude-status` | Native Claude subscription sign-in / redacted auth status; does not need a running gateway |
+| `capabilities` | Inspect provider readiness, image-model restrictions and concurrency |
 | `requests` | Show recent admitted inference outcomes and token usage |
 | `key` | Print the local client key |
 
@@ -31,6 +34,13 @@ All commands use the same environment settings. Put `--port` before the command 
 | `CHATGPT_GATEWAY_MAX_CONCURRENCY` | `12` |
 | `CHATGPT_GATEWAY_TIMEOUT_SECONDS` | `600` |
 | `CHATGPT_GATEWAY_MAX_REQUEST_BYTES` | `8388608` (8 MiB) |
+| `CHATGPT_GATEWAY_CODEX_IMAGES` | `0`; set `1` to enable native Codex default image generation |
+| `CHATGPT_GATEWAY_CODEX_BINARY` | `codex`; executable name or absolute path |
+| `CHATGPT_GATEWAY_IMAGE_MAX_CONCURRENCY` | `1`; must be between 1 and the shared maximum |
+| `CHATGPT_GATEWAY_CLAUDE_CODE` | `0`; set `1` to enable the separate Claude Code subscription route |
+| `CHATGPT_GATEWAY_CLAUDE_BINARY` | `claude`; executable name or absolute path |
+| `CHATGPT_GATEWAY_CLAUDE_CODE_MAX_CONCURRENCY` | `1`; within the shared maximum |
+| `CHATGPT_GATEWAY_CLAUDE_CODE_MAX_TOKENS` | `32768`; native output ceiling when the caller omits one, 1–128000 |
 | `CHATGPT_GATEWAY_ACCEPT_CHATGPT_DATA_CONTROLS` | `0` (strict data-policy handling) |
 | `ANTHROPIC_API_KEY` | Unset; enables the Anthropic API route when configured |
 | `CHATGPT_GATEWAY_ANTHROPIC_API_KEY_FILE` | `<data directory>/anthropic-api-key` (owner-only, optional) |
@@ -53,7 +63,114 @@ to ask again explicitly. Both the mode and instruction version are recorded.
 It changes the model's formatting context, so record it when comparing benchmarks. The native
 mode remains the default. See [the compatibility contract](compatibility.md#claude-chat-completions-input).
 
-Concurrency limits model calls across all clients and **both providers combined** in this gateway process. The authenticated capability endpoint reports the configured `max_concurrency`. Callers should queue excess requests: an occupied gateway returns `429 gateway_busy` after one second. Application batch/job limits are separate and must also allow concurrent runs. Both providers' upstream account limits still apply; this local setting does not increase account allowance.
+Concurrency limits model calls across all clients and **all providers combined**, including
+Codex images and Claude Code. The shared maximum defaults to 12; the nested image and
+Claude Code maxima each default to 1.
+An image takes one image slot and one shared slot. Images waiting for their narrower pool do
+not consume text capacity. For example, 11 text calls plus 1 image fill the default pool.
+Set both variables before starting the server to change them. Image concurrency cannot exceed
+the shared maximum. Busy admission returns `429 gateway_busy` after at most one second, with
+`Retry-After: 1`; no persistent work queue or automatic inference retry is added.
+The authenticated capability endpoint reports `max_concurrency` and
+`concurrency.{shared_max,image_max,claude_code_max,images_use_shared_pool,claude_code_uses_shared_pool,admission_timeout_seconds,queue}`.
+Application batch/job limits and upstream account quotas are separate. A local cap does not
+increase allowance or guarantee that the provider accepts that many concurrent tasks.
+
+## Native Claude subscription worker
+
+Enable `CHATGPT_GATEWAY_CLAUDE_CODE=1`, use `claude-login` and complete native subscription
+sign-in, then check `claude-status`. The worker requires POSIX process groups and Claude Code
+2.1.284 or later; tested with 2.1.289. `--bare` is deliberately avoided because it skips native
+OAuth/keychain authentication. Safe mode and empty setting sources disable user/project
+customizations while preserving native login. Managed policy still applies.
+
+The gateway removes inherited API keys, bearer tokens, cloud/provider overrides, proxy variables
+and parent session settings from the native environment. It checks native auth before every
+execution and requires `claude.ai`, `firstParty` and an eligible subscription type. A session
+that reports an API-key source is refused. Credentials stay in Claude Code's own storage;
+this route does not use the gateway's Anthropic key file or public ChatGPT OAuth registration.
+
+Only `/claude-code/v1/models` and `/claude-code/v1/chat/completions` select this backend.
+The existing `/api/v1` and `/v1` Claude model IDs continue to use the Console API key. There
+is no automatic fallback in either direction. No client application's settings are changed.
+Native discovery lists the two gateway-supported model pins after version/auth checks; it
+does not call a subscription catalogue or prove model entitlement. Every completed answer
+must verify the pinned model in session, assistant and per-model usage metadata.
+
+Requests run in private temporary directories with tools/MCP/slash commands/browser integration
+disabled, caller system context replacing the coding prompt, and session persistence disabled.
+The subprocess receives prompt text over stdin and a private system file; neither raw output
+nor prompt/schema content is journalled. CLI sessions are limited to one answer turn and the
+gateway accepts only a final success result, one turn, the expected model and a completed
+stop reason. Timeout, HTTP disconnect, unexpected tools/models and failure terminate the process
+group and release both pools. Native API retry notifications stop the worker; the gateway
+never replays inference or switches billing routes. Native internals remain a benchmark variable.
+
+Structured output uses the explicit `validated_json` contract, with the original schema in a
+formatting instruction and original local validation. No native schema tool/re-prompt loop is
+enabled. Invalid completed JSON returns HTTP 422 with bounded validation reasons and known
+usage. The CLI manages prompt caching automatically; block markers, TTLs and cache opt-outs
+are refused. Native output ceilings use documented `CLAUDE_CODE_MAX_OUTPUT_TOKENS`; Claude
+applies its model limits. Conversation history and streaming require the API route for now.
+
+Response headers and `gateway_usage` identify `claude_code`, `claude_subscription`, contract
+version, actual served model, turn count and retry events. Native fresh/read/write tokens are
+normalized using the same accounting rules as the API backend. Missing usage stays null.
+These counters include Claude Code overhead; the gateway does not infer remaining subscription
+percentage or cash spend from the CLI's API-equivalent cost estimate. Account usage-credit
+settings may permit paid continuation; the gateway neither verifies nor changes that setting.
+
+References: [native automation](https://code.claude.com/docs/en/headless),
+[safe mode and flags](https://code.claude.com/docs/en/cli-reference),
+[authentication precedence](https://code.claude.com/docs/en/authentication),
+[model fallback and identity](https://code.claude.com/docs/en/model-config).
+
+## Native Codex image worker
+
+Images are opt-in and require POSIX process groups (macOS/Linux); this worker does not
+support Windows process management yet. Start a recent native Codex CLI with `codex login`, choose ChatGPT, and
+verify `codex login status`; then set `CHATGPT_GATEWAY_CODEX_IMAGES=1` in the gateway environment.
+Tested with Codex CLI `0.163.0-alpha.10.2`. This worker requires CLI support for `exec`,
+`--ignore-user-config`, `--ignore-rules`, `--ephemeral`, JSON events, output schemas and
+built-in image generation. It uses Codex's own credential store. The gateway never extracts
+tokens or installs a private backend proxy. Codex login and the gateway's public OAuth
+connection are independent. API-key-only native login is refused and API-key variables are
+not passed to the worker. No paid Images API route or fallback exists.
+
+Only the `codex/imagegen` capability alias is exposed: **the default image engine selected by
+Codex**, not selectable GPT Image models. Current official docs identify the built-in default
+as `gpt-image-2`; the gateway reports `codex_default` and `image_model_verified:false` because
+it does not independently verify or pin that engine/snapshot. Size, quality and background
+are automatic; explicit values are refused. A natural-language request can describe a desired
+composition, but it is not an enforced API setting. One final PNG is returned per request.
+
+Readiness checks the executable and ChatGPT login, cached for 15 seconds. It does not spend
+allowance or prove generation entitlement. Missing readiness hides the model from `/models`
+and explains the reason under `providers.codex` in `/gateway/capabilities`. A configured but
+unavailable image request fails explicitly. An enabled Codex-only gateway can list and use
+its image entry without a separate gateway OAuth connection or Anthropic key.
+
+Each request runs an ephemeral Codex agent task in a private temporary directory, with user
+configuration/rules, project instruction discovery, shell, browser and app tools disabled.
+Prompts go over stdin, references are validated PNG/JPEG/WebP inputs, and local API keys are
+excluded from the environment. A completed turn and a valid image within that newly created
+Codex thread's generated-image directory are required. Unrelated paths and symlink escapes
+are rejected. The worker validates and returns a PNG, then removes its temporary references
+and current-thread generated images. Raw CLI output and prompts are never journalled.
+Timeouts and caller disconnects terminate the worker process group and release both pools.
+
+`CHATGPT_GATEWAY_TIMEOUT_SECONDS` also bounds image tasks, including native login preflight;
+it defaults to 600 seconds. CLI output and returned images have size limits. Malformed or
+missing artifacts after a completed turn return `422 image_not_produced`; a partial turn is
+not success. Usage limits fail explicitly. There is no gateway retry to regenerate an image.
+Each request is an agent workflow, so its latency and reported agent tokens include harness
+overhead. Native image token/cash usage is not separately available: `usage` is null,
+`gateway_usage.agent` contains only actual CLI token counters and `gateway_usage.image` stays
+null. Unknown usage is never zero or a fabricated cash price. Record the backend and contract
+version when comparing these outputs to direct API generations.
+
+See [image request formats](compatibility.md#codex-default-image-generation) and
+[OpenAI's Codex image documentation](https://learn.chatgpt.com/docs/image-generation).
 
 ## Prompt caching
 
@@ -78,6 +195,8 @@ not certify OpenRouter's policy or change model selection or billing. Both defau
 | Local `401 invalid_api_key` | Use the key from `chatgpt-gateway key`, not a vendor key. |
 | `sign_in_expired` or repeated `token_expired` | Run `chatgpt-gateway login` again. Eligible token renewal is automatic, with at most one retry of an explicitly rejected request. |
 | `429 gateway_busy` | Queue calls in your client; the gateway's default shared concurrency is 12. |
+| Codex image entry missing | Enable `CHATGPT_GATEWAY_CODEX_IMAGES=1`, check the executable and ChatGPT native login, then inspect `capabilities`. Readiness caches for 15 seconds. |
+| Image model, size or quality refused | Only `codex/imagegen` and default (`auto`) settings are supported; see the image contract. |
 | Upstream usage limit or insufficient credits | Check the selected provider's account limits and billing. The gateway never changes providers to get around them. |
 | Unsupported model or field | Select an exact `models` ID and check the [compatibility contract](compatibility.md). This implements a subset of OpenRouter. |
 | Claude rejects a large JSON schema | Consider the explicit `validated_json` mode documented above. Completed invalid output still fails validation. |

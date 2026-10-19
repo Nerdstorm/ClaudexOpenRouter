@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hmac
 import html
 import json
@@ -13,14 +14,20 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
 from .anthropic_protocol import JSON_INSTRUCTION_VERSION, claude_request
 from .anthropic_upstream import ClaudeClient
 from .auth import Auth
+from .claude_code import ClaudeCodeClient
+from .claude_code_protocol import CLAUDE_CODE_CONTRACT, subscription_request
+from .codex_images import IMAGE_CONTRACT_VERSION, CodexImageClient
 from .config import Settings
 from .errors import GatewayError, invalid
+from .image_protocol import IMAGE_MODEL, image_chat_request, image_request, image_type
 from .protocol import Prepared, chat_request, completion, responses_request, usage_counts
 from .storage import Store, public_account
 from .upstream import PlanClient
@@ -51,7 +58,7 @@ def sse(value: dict | str) -> bytes:
     return f"data: {payload}\n\n".encode()
 
 
-async def read_body(request: Request, limit: int) -> dict[str, Any]:
+async def read_bytes(request: Request, limit: int) -> bytes:
     data = bytearray()
     async for chunk in request.stream():
         data.extend(chunk)
@@ -59,6 +66,11 @@ async def read_body(request: Request, limit: int) -> dict[str, Any]:
             raise GatewayError(
                 413, "The request exceeds the gateway size limit.", "request_too_large"
             )
+    return bytes(data)
+
+
+async def read_body(request: Request, limit: int) -> dict[str, Any]:
+    data = await read_bytes(request, limit)
     try:
         value = json.loads(data)
         if not isinstance(value, dict):
@@ -66,6 +78,72 @@ async def read_body(request: Request, limit: int) -> dict[str, Any]:
         return value
     except (ValueError, UnicodeDecodeError, RecursionError) as error:
         raise GatewayError(400, "Send a JSON object.", "invalid_json") from error
+
+
+async def completed_job(request: Request, work):
+    """Cancel a native worker when its HTTP client goes away."""
+    job = asyncio.create_task(work)
+    stopped = asyncio.Event()
+
+    async def disconnected():
+        while not stopped.is_set():
+            if await request.is_disconnected():
+                return
+            try:
+                await asyncio.wait_for(stopped.wait(), 0.25)
+            except TimeoutError:
+                pass
+
+    disconnect = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait([job, disconnect], return_when=asyncio.FIRST_COMPLETED)
+        if job not in done:
+            raise GatewayError(499, "The client disconnected.", "client_disconnected")
+        return await job
+    finally:
+        # Starlette probes use cancellation scopes: stop the probe cooperatively.
+        stopped.set()
+        job.cancel()
+        await asyncio.gather(job, disconnect, return_exceptions=True)
+
+
+async def read_image_body(request: Request, limit: int) -> dict[str, Any]:
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        return await read_body(request, limit)
+    data = await read_bytes(request, limit)
+
+    async def parts():
+        yield data
+
+    try:
+        form = await MultiPartParser(
+            request.headers, parts(), max_files=5, max_fields=20, max_part_size=limit
+        ).parse()
+    except MultiPartException as error:
+        raise invalid("Invalid image multipart request.", "image") from error
+    body, images = {}, []
+    try:
+        for name, value in form.multi_items():
+            if name in {"image", "image[]"}:
+                if not isinstance(value, UploadFile):
+                    raise invalid("Multipart reference images must be uploaded files.", "image")
+                content = await value.read(limit + 1)
+                images.append(
+                    f"data:{image_type(content)};base64,{base64.b64encode(content).decode()}"
+                )
+            else:
+                if name in body or not isinstance(value, str):
+                    raise invalid("Image parameters must be supplied once as text fields.", name)
+                body[name] = value
+        if images:
+            body["image"] = images
+        if "n" in body:
+            if body["n"] != "1":
+                raise invalid("Codex image requests support n=1 only.", "n")
+            body["n"] = 1
+        return body
+    finally:
+        await form.close()
 
 
 def create_app(
@@ -92,6 +170,8 @@ def create_app(
                 slots = asyncio.Semaphore(settings.max_concurrency)
                 app.state.plan = PlanClient(settings, store, app.state.auth, client, slots=slots)
                 app.state.claude = ClaudeClient(settings, store, client, slots=slots)
+                app.state.images = CodexImageClient(settings, store, slots=slots)
+                app.state.claude_code = ClaudeCodeClient(settings, store, slots=slots)
                 yield
         finally:
             lock.release()
@@ -178,6 +258,8 @@ def create_app(
                 "configured": bool(settings.anthropic_api_key),
                 "billing_source": "anthropic_api",
             },
+            "codex": await app.state.images.availability(),
+            "claude_code": await app.state.claude_code.availability(fresh=True),
         }
 
     @app.get("/gateway/accounts")
@@ -192,19 +274,76 @@ def create_app(
     @app.get("/gateway/capabilities")
     async def capabilities(request: Request):
         authorize(request)
+        images = await app.state.images.availability()
+        claude_code = await app.state.claude_code.availability()
         return {
             "provider": "chatgpt_plan",
             "chat_completions": True,
             "max_concurrency": settings.max_concurrency,
+            "concurrency": {
+                "shared_max": settings.max_concurrency,
+                "image_max": settings.image_max_concurrency,
+                "images_use_shared_pool": True,
+                "claude_code_max": settings.claude_code_max_concurrency,
+                "claude_code_uses_shared_pool": True,
+                "admission_timeout_seconds": 1,
+                "queue": False,
+            },
             "responses": True,
             "structured_output": "subject_to_model_access",
             "image_input": "subject_to_model_access",
-            "image_generation": False,
+            "image_generation": images["ready"],
             "billing_fallback": False,
             "chat_web_search": "openrouter_native_subject_to_model_access",
             "data_controls": "chatgpt_account",
             "openrouter_data_policy_override_enabled": settings.accept_chatgpt_data_controls,
             "providers": {
+                "claude_code": {
+                    **claude_code,
+                    "base_url": f"{settings.base_url}/claude-code/v1",
+                    "chat_completions": True,
+                    "responses": False,
+                    "streaming": False,
+                    "history": "one_user_message",
+                    "structured_output_mode": "validated_json",
+                    "structured_output_version": JSON_INSTRUCTION_VERSION,
+                    "contract_version": CLAUDE_CODE_CONTRACT,
+                    "max_concurrency": settings.claude_code_max_concurrency,
+                    "max_tokens_default": settings.claude_code_max_tokens,
+                    "max_turns": 1,
+                    "prompt_caching": "cli_managed",
+                    "billing_source": "claude_subscription",
+                    "billing_controls": "claude_account",
+                    "extra_usage_verified_disabled": False,
+                    "access_verified": False,
+                    "openrouter_data_policy_override_enabled": (
+                        settings.accept_anthropic_data_controls
+                    ),
+                },
+                "codex": {
+                    **images,
+                    "image_generation": images["ready"],
+                    "model": IMAGE_MODEL if images["ready"] else None,
+                    "image_model": "codex_default",
+                    "selectable_image_model": False,
+                    "image_model_verified": False,
+                    "streaming": False,
+                    "image_max_concurrency": settings.image_max_concurrency,
+                    "billing_source": "codex_plan",
+                    "data_controls": "codex_account",
+                    "max_output_images": 1,
+                    "max_reference_images": 5,
+                    "size": ["auto"],
+                    "quality": ["auto"],
+                    "background": ["auto"],
+                    "output_format": ["png"],
+                    "reference_input": ["base64_data_url", "multipart"],
+                    "contract_version": IMAGE_CONTRACT_VERSION,
+                    "access_verified": False,
+                    "openrouter_data_policy_override_enabled": (
+                        settings.accept_chatgpt_data_controls
+                    ),
+                },
                 "chatgpt_plan": {"chat_completions": True, "responses": True},
                 "anthropic": {
                     "configured": bool(settings.anthropic_api_key),
@@ -301,16 +440,127 @@ def create_app(
     async def models(request: Request):
         authorize(request)
         rows = []
-        if store.active() is not None or not settings.anthropic_api_key:
+        if (store.active() or {}).get("access_token") or (
+            not settings.anthropic_api_key and not settings.codex_images_enabled
+        ):
             account = await app.state.auth.credentials()
             rows.extend(await app.state.plan.catalog(account, fresh=True))
         if settings.anthropic_api_key:
             rows.extend(await app.state.claude.catalog(fresh=True))
+        rows.extend(await app.state.images.catalog())
         return {"object": "list", "data": rows}
+
+    @app.get("/claude-code/v1/models")
+    async def claude_code_models(request: Request):
+        authorize(request)
+        return {"object": "list", "data": await app.state.claude_code.catalog()}
+
+    @app.post("/claude-code/v1/chat/completions")
+    async def claude_code_completion(request: Request):
+        authorize(request)
+        body = await read_body(request, settings.max_request_bytes)
+        prepared = await asyncio.to_thread(subscription_request, body, settings)
+        request_id = uuid.uuid4().hex
+        headers = {
+            "x-gateway-request-id": request_id,
+            "x-gateway-provider": "claude_code",
+            "x-gateway-billing-source": "claude_subscription",
+            "x-gateway-data-controls": "claude_account",
+            "x-gateway-native-contract-version": CLAUDE_CODE_CONTRACT,
+        }
+        if prepared.schema and prepared.schema["type"] == "json_schema":
+            headers["x-gateway-structured-output-mode"] = "validated_json"
+            headers["x-gateway-structured-output-version"] = JSON_INSTRUCTION_VERSION
+        if prepared.data_policy_override:
+            headers["x-gateway-policy-override"] = "provider.data_collection"
+        try:
+            result = await completed_job(
+                request,
+                app.state.claude_code.generate(
+                    prepared,
+                    request_id=request_id,
+                    client_name=request.headers.get("x-title", "unspecified")[:100],
+                ),
+            )
+            return JSONResponse(result, headers=headers)
+        except GatewayError as error:
+            error.headers.update(headers)
+            raise
+
+    async def image_infer(request: Request, body: dict, *, chat: bool = False, edit: bool = False):
+        prepared = (
+            await asyncio.to_thread(image_chat_request, body, settings)
+            if chat
+            else (await asyncio.to_thread(image_request, body, settings, edit=edit))
+        )
+        request_id = uuid.uuid4().hex
+        headers = {
+            "x-gateway-request-id": request_id,
+            "x-gateway-provider": "codex",
+            "x-gateway-billing-source": "codex_plan",
+            "x-gateway-data-controls": "codex_account",
+            "x-gateway-image-model": "codex_default",
+            "x-gateway-image-contract-version": IMAGE_CONTRACT_VERSION,
+        }
+        if prepared.data_policy_override:
+            headers["x-gateway-policy-override"] = "provider.data_collection"
+        work = app.state.images.generate(
+            prepared,
+            request_id=request_id,
+            endpoint="chat.completions.images"
+            if chat
+            else "images.edits"
+            if edit
+            else "images.generations",
+            client_name=request.headers.get("x-title", "unspecified")[:100],
+        )
+        try:
+            result = await completed_job(request, work)
+            if chat:
+                result = {
+                    "id": f"chatcmpl-{request_id}",
+                    "object": "chat.completion",
+                    "created": result["created"],
+                    "model": IMAGE_MODEL,
+                    "provider": "codex",
+                    "image_model": "codex_default",
+                    "image_model_verified": False,
+                    "usage": None,
+                    "gateway_usage": result["gateway_usage"],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "images": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": "data:image/png;base64,"
+                                            + result["data"][0]["b64_json"]
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            return JSONResponse(result, headers=headers)
+        except GatewayError as error:
+            error.headers.update(headers)
+            raise
 
     async def infer(request: Request, *, chat: bool):
         authorize(request)
         body = await read_body(request, settings.max_request_bytes)
+        if isinstance(body.get("model"), str) and body["model"].startswith("codex/"):
+            if not chat:
+                raise invalid(
+                    "codex/imagegen is available on image and Chat endpoints only.", "model"
+                )
+            return await image_infer(request, body, chat=True)
         is_claude = isinstance(body.get("model"), str) and body["model"].startswith("anthropic/")
         if is_claude:
             if not chat:
@@ -383,15 +633,22 @@ def create_app(
         return await infer(request, chat=False)
 
     @app.post("/v1/images/generations")
-    @app.post("/v1/images/edits")
+    @app.post("/api/v1/images/generations")
     @app.post("/api/v1/images")
-    async def unsupported_image_generation(request: Request):
+    async def image_generations(request: Request):
         authorize(request)
-        raise GatewayError(
-            400,
-            "Image generation and editing are unavailable through the ChatGPT-plan route.",
-            "unsupported_capability",
-            "image_generation",
+        return await image_infer(
+            request, await read_image_body(request, settings.max_request_bytes)
+        )
+
+    @app.post("/v1/images/edits")
+    @app.post("/api/v1/images/edits")
+    async def image_edits(request: Request):
+        authorize(request)
+        return await image_infer(
+            request,
+            await read_image_body(request, settings.max_request_bytes),
+            edit=True,
         )
 
     return app

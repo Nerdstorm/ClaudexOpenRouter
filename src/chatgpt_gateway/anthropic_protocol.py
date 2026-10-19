@@ -52,7 +52,9 @@ def text_blocks(value: Any) -> list[dict]:
     return blocks
 
 
-def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
+def claude_request(
+    body: dict[str, Any], settings: Settings, *, data_controls: str = "Claude Console"
+) -> Prepared:
     unknown_fields(body, CLAUDE_FIELDS)
     if not isinstance(body.get("model"), str) or body["model"] not in CLAUDE_MODELS:
         raise invalid("Select an exact Claude model id from /v1/models.", "model")
@@ -60,7 +62,7 @@ def claude_request(body: dict[str, Any], settings: Settings) -> Prepared:
         body.get("provider"),
         accept_chatgpt_data_controls=settings.accept_anthropic_data_controls,
         provider_name="anthropic",
-        data_controls="Claude Console",
+        data_controls=data_controls,
     )
     if body.get("tools") is not None and body["tools"] != []:
         raise invalid("This Claude route is text-only; tools are unavailable.", "tools")

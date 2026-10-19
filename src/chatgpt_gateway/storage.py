@@ -119,6 +119,12 @@ class Store:
             "structured_output_mode",
             "structured_output_version",
             "first_token_ms",
+            "image_model",
+            "image_contract_version",
+            "native_contract_version",
+            "native_cli_version",
+            "native_turns",
+            "native_retry_events",
         }
         if set(event) - allowed:
             raise ValueError("Unexpected journal field")

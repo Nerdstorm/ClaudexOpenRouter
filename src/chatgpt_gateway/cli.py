@@ -1,5 +1,6 @@
 import argparse
 import json
+import subprocess
 import sys
 import webbrowser
 from dataclasses import replace
@@ -9,6 +10,7 @@ import httpx
 import uvicorn
 
 from .app import create_app
+from .claude_code import worker_environment
 from .config import Settings
 from .storage import Store
 
@@ -27,7 +29,15 @@ def main() -> None:
     use = commands.add_parser("use", help="Select a saved account")
     use.add_argument("account_id")
     commands.add_parser("logout", help="Revoke and clear the active renewable session")
-    commands.add_parser("models", help="List the connected account's model catalog")
+    models = commands.add_parser(
+        "models", help="List models from configured providers and optional Codex images"
+    )
+    models.add_argument("--backend", choices=["default", "claude-code"], default="default")
+    commands.add_parser("capabilities", help="Show model capabilities and shared/image concurrency")
+    commands.add_parser(
+        "claude-login", help="Sign native Claude Code in with a Claude subscription"
+    )
+    commands.add_parser("claude-status", help="Show native Claude subscription sign-in status")
     commands.add_parser("requests", help="Show recent request outcomes and token usage")
     commands.add_parser("key", help="Print the LOCAL gateway key for client configuration")
     args = parser.parse_args()
@@ -37,6 +47,41 @@ def main() -> None:
             parser.error("--port must be between 1 and 65535")
         settings = replace(settings, port=args.port)
     store = Store(settings.data_dir)
+    if args.command in {"claude-login", "claude-status"}:
+        native_args = [settings.claude_binary, "--safe-mode", "--setting-sources", ""]
+        try:
+            if args.command == "claude-login":
+                raise SystemExit(
+                    subprocess.run(
+                        [*native_args, "auth", "login", "--claudeai"], env=worker_environment()
+                    ).returncode
+                )
+            result = subprocess.run(
+                [*native_args, "auth", "status", "--json"],
+                env=worker_environment(),
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            payload = json.loads(result.stdout)
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid native auth status")
+            print(
+                json.dumps(
+                    {
+                        k: payload.get(k)
+                        for k in ("loggedIn", "authMethod", "apiProvider", "subscriptionType")
+                    },
+                    indent=2,
+                )
+            )
+            raise SystemExit(result.returncode)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            print(
+                "Claude Code is unavailable; install a supported CLI and try again.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
     if args.command == "key":
         print(store.api_key)
         return
@@ -65,7 +110,9 @@ def main() -> None:
             elif args.command == "logout":
                 response = client.post("/gateway/logout")
             elif args.command == "models":
-                response = client.get("/v1/models")
+                response = client.get(
+                    "/claude-code/v1/models" if args.backend == "claude-code" else "/v1/models"
+                )
             else:
                 response = client.get(f"/gateway/{args.command}")
             if response.status_code != 200:

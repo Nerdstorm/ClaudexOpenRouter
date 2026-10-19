@@ -184,11 +184,9 @@ def test_capabilities_describe_image_review_without_promising_generation(client,
 
 
 @pytest.mark.parametrize("path", ["/v1/images/generations", "/v1/images/edits", "/api/v1/images"])
-def test_image_generation_is_explicitly_unavailable_without_any_upstream_call(
-    client, backend, path
-):
+def test_api_image_model_ids_are_not_substituted_by_the_codex_route(client, backend, path):
     response = client.post(path, json={"model": "gpt-image-2", "prompt": "A bowl of rice"})
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "unsupported_capability"
-    assert response.json()["error"]["param"] == "image_generation"
+    assert response.json()["error"]["code"] == "unsupported_parameter"
+    assert response.json()["error"]["param"] == "model"
     assert not backend.requests

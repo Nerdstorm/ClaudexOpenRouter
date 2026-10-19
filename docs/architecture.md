@@ -8,18 +8,33 @@ flowchart LR
     G --> P[Protocol validation and translation]
     P --> T[PlanClient]
     P --> CAPI[ClaudeClient]
+    P --> I[CodexImageClient · optional]
+    G -->|/claude-code/v1| CP[Subscription protocol validation]
+    CP --> CC[ClaudeCodeClient · optional]
     T -->|Account-specific OAuth bearer| R[Public OpenAI Responses API]
     CAPI -->|Configured Console API key| AR[Official Anthropic Messages API]
     T --> J[Metadata journal]
     CAPI --> J
+    I -->|Native CLI + its own ChatGPT login| CLI[Codex default image tool]
+    I --> J
+    CC -->|Native subscription login| CCLI[Claude Code · tool-free session]
+    CC --> J
     L[Shared concurrency limit] --> T
     L --> CAPI
+    L --> I
+    L --> CC
+    IL[Image concurrency limit] --> I
+    CL[Claude subscription concurrency limit] --> CC
     A[Account and token manager] --> T
     A --> S[Protected local store]
     B[System browser] -->|State-protected callback| A
 ```
 
-The gateway owns HTTP compatibility, account permissions and transport. Client applications own prompts, schemas, role assignments, evaluation labels, retries and tool execution. No module imports a client application. There is no background agent harness and no access to desktop conversations.
+The gateway owns HTTP compatibility, account permissions and transport. Client applications own
+prompts, schemas, role assignments, evaluation labels, retries and ordinary tool execution.
+No module imports a client application or reads desktop conversations. Default text providers
+use APIs directly. Explicit optional backends own bounded native Codex image tasks or Claude
+Code text sessions; native clients retain ownership of their own credentials.
 
 ## Responsibilities
 
@@ -31,6 +46,11 @@ The gateway owns HTTP compatibility, account permissions and transport. Client a
 | `protocol.py` | Supported request subset, Chat-to-Responses translation, JSON-schema validation, response conversion |
 | `anthropic_protocol.py` | Explicit OpenRouter-to-Claude model mapping, portable cache controls, schema transformation, native usage normalization |
 | `anthropic_upstream.py` | Real Anthropic catalogue, no-retry SDK transport, terminal/model validation, provider-labelled cache/latency journal |
+| `claude_code_protocol.py` | Explicit subscription text/JSON subset; reject unsupported history/cache/stream semantics |
+| `claude_code.py` | Native subscription readiness, exact model/provenance checks, one-turn completion, nested/shared admission and usage |
+| `native_process.py` | Native process-group termination and descendant cleanup |
+| `image_protocol.py` | Default-image capability alias, strict image request subset and validated reference formats |
+| `codex_images.py` | Native ChatGPT-authenticated CLI worker, readiness, nested admission, bounded subprocess lifecycle, current-thread artifacts and actual agent usage |
 | `upstream.py` | Account catalog, model admission, bounded concurrency, public HTTP/SSE, terminal validation and journal outcomes |
 | `app.py` | Local authentication, host/origin boundary, body limits, routes and streaming adaptation |
 | `cli.py` | Server lifecycle, browser sign-in and local management commands |
@@ -64,7 +84,7 @@ Admitted attempts have a `started` event and a terminal `completed`, `failed` or
 
 ## Claude routing, caching and billing
 
-The same Chat endpoint selects Claude only for an explicit supported `anthropic/...` model id. Claude API credentials are configured independently from renewable ChatGPT credentials. They are read from the server environment or an owner-only key file, never from Claude Code, browser cookies or desktop storage. There is no subscription OAuth proxy or agent harness. `GET /models` combines the real configured-provider catalogues; Claude can operate without a ChatGPT login. A failing configured-provider catalogue is reported rather than silently replaced. Both transports acquire the same global semaphore, so the 12-call limit cannot become 24 calls by enabling a second provider.
+The default Chat endpoint selects the Claude API only for an explicit supported `anthropic/...` model id. Claude API credentials are configured independently from renewable ChatGPT credentials. They are read from the server environment or an owner-only key file, never from Claude Code, browser cookies or desktop storage. This API backend uses no agent harness. `GET /models` combines the real configured-provider catalogues; Claude can operate without a ChatGPT login. A failing configured-provider catalogue is reported rather than silently replaced. All backends acquire the same global semaphore, so enabling more providers does not multiply the shared limit.
 
 `ClaudeClient` uses the official Anthropic SDK with retries disabled and the shared HTTP client, serving `POST https://api.anthropic.com/v1/messages`. The gateway accepts only the documented text/schema subset. A required output ceiling is explicit per request or supplied by the disclosed Claude default. The SDK reconstructs messages; the gateway additionally requires message start/delta/stop, complete content blocks, exact model identity and an accepted stop reason. Truncation, fallback/tool blocks, wrong models and interrupted streams fail. Stream errors with HTTP 200 must never turn into a successful response. Refusals are returned separately and journalled as `refused`.
 
@@ -75,6 +95,30 @@ Explicit OpenRouter caching markers and TTLs are preserved. The optional default
 API keys charge the linked Console organization. Eligible included credits may cover those calls, but the gateway cannot verify balances or stop precisely at the boundary between promotional and purchased credits. Console workspace limits and billing settings control that. This is not a fallback from OpenAI: the caller explicitly selected a Claude model and its Anthropic API route. Provider-specific OpenRouter data-policy exceptions are independent and off by default. Switching a client to OpenRouter changes URL/key, provider billing and potentially cache warmth, while preserving supported client-side request shapes.
 
 Contracts: [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs), [streaming](https://platform.claude.com/docs/en/build-with-claude/streaming), [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), and [OpenRouter cache controls](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+
+## Separate native Claude subscription backend
+
+`/claude-code/v1` selects the optional subscription backend explicitly; no model-ID ambiguity
+or automatic API fallback is introduced. `ClaudeCodeClient` invokes the documented native
+CLI with subscription authentication, a fresh session, replaced system context, no tools/MCP,
+safe mode and empty settings. Its own cap defaults to one within the shared twelve. Timeout,
+disconnect, invalid output and quota failures terminate the process group and release slots.
+The same process cleanup helper serves both native workers; neither imports the other provider.
+
+Protocol validation reuses common Claude Chat checks, but independently refuses unsupported
+stream/history/cache semantics. The CLI owns automatic caching, authentication and token renewal.
+Credentials and API-key/provider environment overrides are excluded. Every execution freshly
+checks native subscription auth, then verifies exact session/assistant/modelUsage provenance,
+one completed answer turn and original local JSON validation. Native API retry events stop the
+task; there is no gateway inference retry. Model discovery advertises supported pins after
+readiness checks, not an upstream subscription catalogue or a guarantee of model access.
+
+The response and journal label the native contract, CLI-managed cache policy, subscription
+route, actual usage, turns and retry events. Raw CLI streams, prompt/schema files and answers
+are not persisted by the gateway. Native account usage-credit controls can allow paid
+continuation; subscription routing is not proof that extra usage is disabled or cash spend
+is zero. Details and limits: [configuration](configuration.md#native-claude-subscription-worker)
+and [compatibility](compatibility.md#claude-code-subscription).
 
 ## Local files and lifecycle
 
