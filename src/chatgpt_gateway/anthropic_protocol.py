@@ -225,7 +225,14 @@ def claude_request(
     )
 
 
-def claude_usage(value: dict | None) -> dict | None:
+def claude_usage(
+    value: dict | None, rates: dict | None = None, model: str | None = None
+) -> dict | None:
+    """Anthropic usage in the gateway's OpenRouter-shaped form, priced when rates are configured.
+
+    The cost is the configured rates applied to the exact counts Anthropic returned, the same
+    arithmetic Anthropic bills by; it is labelled with the rates' date and is never invented
+    when a count or the model's rate is missing."""
     if value is None:
         return None
     fresh, read, write = (
@@ -246,13 +253,31 @@ def claude_usage(value: dict | None) -> dict | None:
     details = {"cached_tokens": read, "cache_write_tokens": write, "uncached_tokens": fresh}
     if value.get("cache_creation") is not None:
         details["cache_write_tokens_details"] = value["cache_creation"]
-    return {
+    usage = {
         "input_tokens": total_input,
         "output_tokens": output,
         "total_tokens": total,
         "input_tokens_details": details,
         "anthropic": value,
     }
+    rate = ((rates or {}).get("models") or {}).get(model or "")
+    if rate and total is not None:
+        lifetimes = value.get("cache_creation") or {}
+        short, long = (
+            lifetimes.get(k) for k in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+        )
+        if not (type(short) is int and type(long) is int and short + long == write):
+            short, long = write, 0  # the five-minute lifetime is Anthropic's default
+        cost = (
+            fresh * rate["input"]
+            + short * rate["cache_write_5m"]
+            + long * rate["cache_write_1h"]
+            + read * rate["cache_read"]
+            + output * rate["output"]
+        ) / 1_000_000
+        usage["cost"] = round(cost, 8)
+        usage["cost_details"] = {"source": "anthropic_rates", "rates_as_of": rates["as_of"]}
+    return usage
 
 
 def cache_policy(body: dict) -> dict:

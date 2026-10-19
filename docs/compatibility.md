@@ -191,7 +191,7 @@ Portable example for either the gateway or OpenRouter:
 
 The placeholder text must be replaced with a real sufficiently long prefix. Exact matching, model-specific minimums and expiry determine cache hits. Explicit request controls remain portable; gateway-injected defaults do not automatically apply on OpenRouter. Caches are not assumed shared across model/provider/organization changes. The gateway neither warms caches with dummy calls nor serializes matching requests. See [Anthropic caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) and [OpenRouter caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
 
-Claude completion uses the ordinary Chat object/chunk shape, actual OpenRouter model id and `provider:"anthropic"`. Headers disclose `x-gateway-provider:anthropic`, `x-gateway-billing-source:anthropic_api` and `x-gateway-data-controls:claude_console`. Usage normalizes native `cache_read_input_tokens` and `cache_creation_input_tokens` into `prompt_tokens_details.cached_tokens` and `cache_write_tokens`; total input is uncached + read + write. Original native usage and cache-write lifetime breakdowns are retained in journal usage; unknown counts remain null. Time to first text and total duration are recorded separately. No unverified cash price, balance or included-credit guarantee is fabricated.
+Claude completion uses the ordinary Chat object/chunk shape, actual OpenRouter model id and `provider:"anthropic"`. Headers disclose `x-gateway-provider:anthropic`, `x-gateway-billing-source:anthropic_api` and `x-gateway-data-controls:claude_console`. Usage normalizes native `cache_read_input_tokens` and `cache_creation_input_tokens` into `prompt_tokens_details.cached_tokens` and `cache_write_tokens`; total input is uncached + read + write. Original native usage and cache-write lifetime breakdowns are retained in journal usage; unknown counts remain null. Time to first text and total duration are recorded separately. No balance or included-credit guarantee is fabricated. A cash price is reported only when the operator configures a rates file: `usage.cost` is then those rates applied to the exact counts, labelled with the rates' date (see configuration).
 
 The same global concurrency pool limits all providers combined, including Codex images.
 Anthropic SDK retries are disabled. A validated `message_stop`, completed blocks, correct
@@ -209,6 +209,13 @@ Closing or timing out a stream releases its slot and records the outcome.
 schema transformation and native grammar, then validates against the client's original schema.
 Known grammar-size rejections return `400 schema_compilation_limit`, with a safe explanation
 and upstream request ID; native error text is not copied into the response or journal.
+
+When Anthropic refuses a call because the API organization's credit balance is too low, the
+gateway returns `402 insufficient_credit` with the upstream request ID instead of a generic
+`400`, so a client can stop sending work until credit is added in Claude Console. The gateway
+reports the refusal only; it never reads or claims to verify the balance.
+This applies to the API backend. The explicit `/claude-code/v1` subscription backend uses
+its native Claude account limits, and is never selected as an automatic fallback.
 
 An operator may select `validated_json` when the native compiler cannot support the contract.
 The Chat `response_format` and completed response shape stay the same. The gateway appends a

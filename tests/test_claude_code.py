@@ -232,6 +232,34 @@ def test_disabled_backend_fails_without_starting_cli(client):
     assert response.status_code == 503 and response.json()["error"]["code"] == "disabled"
 
 
+def test_api_rates_never_price_native_subscription_usage(native_claude, store, backend):
+    rates = {
+        "as_of": "2026-10-19",
+        "models": {
+            "claude-sonnet-5-5": {
+                "input": 10,
+                "output": 50,
+                "cache_read": 1,
+                "cache_write_5m": 12,
+                "cache_write_1h": 20,
+            }
+        },
+    }
+    app = create_app(
+        replace(native_claude, anthropic_rates=rates),
+        transport=httpx.MockTransport(backend.handler),
+    )
+    with TestClient(app, base_url=native_claude.base_url) as client:
+        client.headers["authorization"] = f"Bearer {store.api_key}"
+        response = client.post("/claude-code/v1/chat/completions", json=REQUEST)
+    assert response.status_code == 200
+    assert response.headers["x-gateway-billing-source"] == "claude_subscription"
+    assert response.json()["usage"].get("cost") is None
+    assert response.json()["usage"].get("cost_details") is None
+    assert store.recent()[-1]["usage"].get("cost") is None
+    assert not backend.requests
+
+
 def test_subscription_policy_override_is_explicit(settings):
     strict = {
         **REQUEST,

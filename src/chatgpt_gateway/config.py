@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,28 @@ DISCOVERY_URL = f"{AUTH_ISSUER}/.well-known/openid-configuration"
 RESOURCE = "https://api.openai.com/v1"
 SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 APP_NAME = "ChatGPT Plan Gateway"
+# One Claude model's rates, USD per million tokens, as a rates file gives them.
+RATE_KEYS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
+
+
+def anthropic_rates(value: object) -> dict:
+    """A rates file's content, checked: `as_of` and one complete rate per native model id."""
+    if not isinstance(value, dict) or not isinstance(value.get("as_of"), str):
+        raise ValueError("The Anthropic rates file needs an as_of date and a models object")
+    models = value.get("models")
+    if not isinstance(models, dict) or not models:
+        raise ValueError("The Anthropic rates file needs a models object")
+    for model, rate in models.items():
+        if not isinstance(rate, dict) or any(
+            type(rate.get(key)) not in (int, float) or rate[key] < 0 for key in RATE_KEYS
+        ):
+            raise ValueError(
+                f"Anthropic rates for {model!r} need nonnegative {', '.join(RATE_KEYS)}"
+            )
+    return {
+        "as_of": value["as_of"],
+        "models": {m: {k: float(r[k]) for k in RATE_KEYS} for m, r in models.items()},
+    }
 
 
 @dataclass(frozen=True)
@@ -31,6 +54,8 @@ class Settings:
     claude_binary: str = "claude"
     claude_code_max_concurrency: int = 1
     claude_code_max_tokens: int = 32768
+    # Prices API calls only when the operator supplies rates; none are built in.
+    anthropic_rates: dict | None = None
 
     @property
     def base_url(self) -> str:
@@ -71,6 +96,13 @@ class Settings:
             key = key_file.read_text().strip()
         if key is not None and (not key.strip() or any(c.isspace() for c in key)):
             raise ValueError("The Anthropic API key must be nonempty and contain no whitespace")
+        rates_file = os.environ.get("CHATGPT_GATEWAY_ANTHROPIC_RATES_FILE")
+        rates = None
+        if rates_file:
+            try:
+                rates = anthropic_rates(json.loads(Path(rates_file).expanduser().read_text()))
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"The Anthropic rates file could not be read: {error}") from error
         settings = cls(
             data_dir=data_dir,
             port=int(os.environ.get("CHATGPT_GATEWAY_PORT", "8317")),
@@ -100,6 +132,7 @@ class Settings:
             claude_code_max_tokens=int(
                 os.environ.get("CHATGPT_GATEWAY_CLAUDE_CODE_MAX_TOKENS", "32768")
             ),
+            anthropic_rates=rates,
         )
         if not 1 <= settings.claude_code_max_concurrency <= settings.max_concurrency:
             raise ValueError("Claude Code concurrency must be between 1 and the shared limit")

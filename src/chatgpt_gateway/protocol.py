@@ -358,6 +358,9 @@ def usage_counts(usage: dict | None, response: dict | None = None) -> dict | Non
         if usage is not None
         else None
     )
+    for key in ("cost", "cost_details"):
+        if counts is not None and usage.get(key) is not None:
+            counts[key] = usage[key]
     if response is not None:
         calls = [
             item for item in response.get("output") or [] if item.get("type") == "web_search_call"
